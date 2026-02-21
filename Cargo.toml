@@ -1,0 +1,20 @@
+[package]
+name = "mini-agent"
+version = "0.1.0"
+edition = "2021"
+description = "A tiny, educational AI agent core for Rust"
+license = "MIT OR Apache-2.0"
+# repository = "https://github.com/yourusername/mini-agent"
+
+[dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+futures = "0.3"
+tokio-stream = "0.1"
+#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
