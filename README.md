@@ -1,55 +1,75 @@
-🛠️ Mini‑Agent
+# Mini‑Agent (Rust)
 
-A minimal AI agent framework in Rust for building LLM-powered agents with tool execution. Designed for simplicity, flexibility, and easy Rust integration.
+A **minimal, extensible AI agent framework** in Rust — composable, async‑first, and built for tool‑integrated LLM workflows.
 
-Mini‑Agent is for developers who want a lightweight, Rust-native agent library, without depending on large AI frameworks.
+Mini‑Agent focuses on predictable structure, simple abstractions, and easy integration with different LLM providers and tool executors.
 
-🔹 Features
+---
 
-LLM provider abstraction – plug in OpenAI, OpenRouter, or any provider
+## Motivation
 
-Tool system – define, register, and invoke tools with structured JSON input/output
+Modern AI agents rely on LLMs *and* tools for real‑world tasks. Many Rust libraries today are minimal or incomplete, with limited flexibility.
 
-Agent loop – simple ReAct-style agent that can call tools and handle outputs
+Mini‑Agent aims to provide a **clean, intuitive agent core** that supports:
 
-Async ready – fully asynchronous tool execution
+- LLM interaction abstraction  
+- Tool invocation via JSON schema  
+- Async tool execution  
+- Structured agent loop for planning & acting
 
-Minimal dependencies – small, clean Rust library
+This project prioritizes **clarity over magic** and **extensibility over complexity**.
 
-📦 Installation
+---
 
-Add this to your Cargo.toml:
+## Status
 
-[dependencies]
-mini-agent = { git = "https://github.com/RajMandaliya/mini-agent" }
-⚡ Quick Start
+**Early‑stage but usable.**  
+The core agent loop, provider abstraction, and simple tools are implemented, but APIs and feature sets may evolve with feedback and real‑world usage.
+
+Expect improvements around:
+
+- Memory and context persistence  
+- Multiple provider support  
+- Streaming outputs  
+- Expanded tool registry
+
+---
+
+## High‑Level Architecture
+
+### Concepts
+
+- **Provider** — wraps the LLM API (OpenRouter by default)  
+- **Tool** — encapsulates an executable action with input schema  
+- **Agent** — orchestrates prompt parsing, tool calls, and results
+
+### Workflow
+
+1. User submits a *prompt* to the agent  
+2. The agent queries the LLM via the provider  
+3. If the LLM *requests a tool call*, the agent executes it  
+4. Tool results are fed back into the conversation  
+5. The loop continues until completion
+
+---
+
+## Example Usage (Single File)
+
+Below is an example showing **defining a custom tool**, registering it, and running the agent:
+
+```rust
 use mini_agent::{
     agent::Agent,
     provider::OpenRouterProvider,
     tool::{Tool, AddNumbersTool}
 };
-
-#[tokio::main]
-async fn main() {
-    // Initialize your LLM provider
-    let provider = OpenRouterProvider::new("YOUR_API_KEY");
-
-    // Create an agent with tools
-    let mut agent = Agent::new(provider)
-        .with_tool(Box::new(AddNumbersTool));
-
-    // Run the agent with a prompt
-    let result = agent.run("Add 4 and 7").await.unwrap();
-
-    println!("Agent output: {}", result);
-}
-🛠️ Creating Your Own Tools
-use mini_agent::tool::Tool;
 use async_trait::async_trait;
 use serde_json::Value;
+```
+// --- Define a custom tool ---
 
+```
 pub struct MultiplyTool;
-
 #[async_trait]
 impl Tool for MultiplyTool {
     fn name(&self) -> &'static str { "MultiplyTool" }
@@ -71,24 +91,24 @@ impl Tool for MultiplyTool {
         serde_json::json!({ "result": x * y })
     }
 }
-🌐 Contributing
 
-Contributions are welcome!
+```
+```
+#[tokio::main]
+async fn main() {
+    // Initialize an LLM provider
+    let provider = OpenRouterProvider::new("YOUR_API_KEY");
 
-Add new tools
+    // Register built‑in and custom tools
+    let mut agent = Agent::new(provider)
+        .with_tool(Box::new(AddNumbersTool))
+        .with_tool(Box::new(MultiplyTool));
 
-Improve provider integrations
+    // Example prompt using tools
+    let result = agent
+        .run("Add 4 and 7, then multiply 3 and 5")
+        .await
+        .unwrap();
 
-Add memory/persistence or multi-agent orchestration
-
-Steps:
-
-Fork the repo
-
-Create a new branch
-
-Submit a pull request
-
-📄 License
-
-MIT License – see LICENSE for details.
+    println!("Agent output: {}", result);
+}
