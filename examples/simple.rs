@@ -2,6 +2,8 @@ use mini_agent::{Agent, AddNumbersTool, OpenRouterProvider};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    //dotenvy::dotenv().ok();
+
     let api_key = std::env::var("OPENROUTER_API_KEY")?;
 
     let model = "meta-llama/llama-3.1-8b-instruct";

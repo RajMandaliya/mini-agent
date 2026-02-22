@@ -3,6 +3,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
+use std::fmt;
 
 #[derive(Error, Debug)]
 pub enum AgentError {
@@ -33,9 +34,20 @@ pub enum Role {
     Tool,
 }
 
+impl fmt::Display for Role {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        };
+        write!(f, "{}", s)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Message {
-    pub role: Role, // "user", "assistant"
+    pub role: Role, 
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
