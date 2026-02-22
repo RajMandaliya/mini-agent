@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use thiserror::Error;
+use std::collections::HashSet;
 use std::fmt;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AgentError {
@@ -36,18 +37,21 @@ pub enum Role {
 
 impl fmt::Display for Role {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::Tool => "tool",
-        };
-        write!(f, "{}", s)
+        write!(
+            f,
+            "{}",
+            match self {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::Tool => "tool",
+            }
+        )
     }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Message {
-    pub role: Role, 
+    pub role: Role,
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -199,10 +203,6 @@ impl LlmProvider for OpenRouterProvider {
         }
 
         let json: Value = response.json().await?;
-        // println!("===== RAW OPENROUTER RESPONSE =====");
-        // println!("{}", serde_json::to_string_pretty(&json).unwrap());
-        // println!("====================================");
-
         let choice = json
             .get("choices")
             .and_then(|v| v.as_array())
@@ -225,11 +225,9 @@ impl LlmProvider for OpenRouterProvider {
                     AgentError::InvalidResponse("missing function in tool call".to_string())
                 })?;
                 let name = function.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-
                 let args_value = function.get("arguments").ok_or_else(|| {
                     AgentError::InvalidResponse("missing arguments".to_string())
                 })?;
-
                 let args: Value = if let Some(s) = args_value.as_str() {
                     serde_json::from_str(s).map_err(|e| {
                         AgentError::InvalidResponse(format!("invalid tool args string: {}", e))
@@ -237,7 +235,6 @@ impl LlmProvider for OpenRouterProvider {
                 } else {
                     args_value.clone()
                 };
-
                 tool_calls.push(ToolCall { id, name, args });
             }
         }
@@ -250,41 +247,86 @@ impl LlmProvider for OpenRouterProvider {
     }
 }
 
+/// -------------------- TOOLS --------------------
+
 pub struct AddNumbersTool;
 
 #[async_trait]
 impl Tool for AddNumbersTool {
-    fn name(&self) -> &'static str {
-        "add_numbers"
-    }
-
-    fn description(&self) -> &'static str {
-        "Adds two integers and returns the result as a string"
-    }
-
+    fn name(&self) -> &'static str { "add_numbers" }
+    fn description(&self) -> &'static str { "Adds two integers and returns the result as a string" }
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "a": { "type": "integer", "description": "First number" },
-                "b": { "type": "integer", "description": "Second number" }
+                "a": { "type": "integer" },
+                "b": { "type": "integer" }
             },
-            "required": ["a", "b"],
+            "required": ["a","b"],
             "additionalProperties": false
         })
     }
 
     async fn execute(&self, args: Value) -> Result<String, AgentError> {
-        let a = args["a"]
-            .as_i64()
-            .ok_or_else(|| AgentError::ToolError("Missing or invalid 'a'".into()))?;
-        let b = args["b"]
-            .as_i64()
-            .ok_or_else(|| AgentError::ToolError("Missing or invalid 'b'".into()))?;
-
+        let a = args["a"].as_i64().ok_or_else(|| AgentError::ToolError("Missing 'a'".into()))?;
+        let b = args["b"].as_i64().ok_or_else(|| AgentError::ToolError("Missing 'b'".into()))?;
         Ok((a + b).to_string())
     }
 }
+
+pub struct MultiplyNumbersTool;
+
+#[async_trait]
+impl Tool for MultiplyNumbersTool {
+    fn name(&self) -> &'static str { "multiply_numbers" }
+    fn description(&self) -> &'static str { "Multiplies two integers and returns the result as a string" }
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "a": { "type": "integer" },
+                "b": { "type": "integer" }
+            },
+            "required": ["a","b"],
+            "additionalProperties": false
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<String, AgentError> {
+        let a = args["a"].as_i64().ok_or_else(|| AgentError::ToolError("Missing 'a'".into()))?;
+        let b = args["b"].as_i64().ok_or_else(|| AgentError::ToolError("Missing 'b'".into()))?;
+        Ok((a * b).to_string())
+    }
+}
+
+pub struct JokeTool;
+
+#[async_trait]
+impl Tool for JokeTool {
+    fn name(&self) -> &'static str { "get_joke" }
+    fn description(&self) -> &'static str { "Fetches a joke from JokeAPI and returns the text" }
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        })
+    }
+
+    async fn execute(&self, _args: Value) -> Result<String, AgentError> {
+        let url = "https://v2.jokeapi.dev/joke/Any";
+        let body = reqwest::get(url).await?.text().await?;
+        let json: Value = serde_json::from_str(&body)?;
+        let joke = if json["type"] == "single" {
+            json["joke"].as_str().unwrap_or("").to_string()
+        } else {
+            format!("{} {}", json["setup"].as_str().unwrap_or(""), json["delivery"].as_str().unwrap_or(""))
+        };
+        Ok(joke)
+    }
+}
+
+/// -------------------- AGENT --------------------
 
 pub struct Agent {
     pub provider: Box<dyn LlmProvider>,
@@ -310,57 +352,73 @@ impl Agent {
     }
 
     pub async fn run(&mut self, user_input: &str) -> Result<String, AgentError> {
-        self.history.push(Message::user(user_input));
+    self.history.push(Message::user(user_input));
+    let mut executed_tool_calls = HashSet::new();
 
-        for _ in 0..self.max_steps {
-            let tool_refs: Vec<&dyn Tool> = self.tools.iter().map(|t| t.as_ref()).collect();
+    for _ in 0..self.max_steps {
+        // Prepare tool references
+        let tool_refs: Vec<&dyn Tool> = self.tools.iter().map(|t| t.as_ref()).collect();
 
-            let completion = self
-                .provider
-                .complete(&self.history, &tool_refs, &self.model)
-                .await?;
+        // Get completion from LLM
+        let completion = self
+            .provider
+            .complete(&self.history, &tool_refs, &self.model)
+            .await?;
 
-            // println!("MODEL RESPONSE: {:#?}", completion);
+        // Push assistant message (with tool_calls if present)
+        self.history.push(Message::assistant_with_tools(
+            completion.content.clone().unwrap_or_default(),
+            completion.raw_tool_calls.clone().unwrap_or(Value::Null),
+        ));
 
-            // Push assistant with tool_calls if present
-            self.history.push(Message::assistant_with_tools(
-                completion.content.clone().unwrap_or_default(),
-                completion.raw_tool_calls.clone().unwrap_or(Value::Null),
-            ));
+        // Execute any new tool calls
+        if !completion.tool_calls.is_empty() {
+            let mut executed_any = false;
 
-            if !completion.tool_calls.is_empty() {
-                for call in &completion.tool_calls {
-                    println!("Executing tool: {}", call.name);
-                    let result = self.execute_tool(call).await?;
-
-                    // 🔑 Push result as assistant content instead of role "tool"
-                    let msg = format!("Tool '{}' returned: {}", call.name, result);
-                    self.history.push(Message {
-                        role: Role::Tool,
-                        content: result,
-                        tool_call_id: Some(call.id.clone()),
-                        tool_calls: None,
-                    });
+            for call in &completion.tool_calls {
+                if executed_tool_calls.contains(&call.id) {
+                    continue; // skip already executed
                 }
-                // Loop again for LLM to see tool results
-                continue;
+
+                println!("Executing tool: {}", call.name);
+                let result = self.execute_tool(call).await?;
+                executed_tool_calls.insert(call.id.clone());
+
+                // Push tool result to history
+                self.history.push(Message {
+                    role: Role::Tool,
+                    content: result.clone(),
+                    tool_call_id: Some(call.id.clone()),
+                    tool_calls: None,
+                });
+
+                executed_any = true;
+
+                // Return first executed tool result immediately
+                return Ok(result);
             }
 
-            if let Some(content) = completion.content {
-                return Ok(content);
+            // If any new tool was executed, loop again to let LLM see results
+            if executed_any {
+                continue;
             }
         }
 
-        Err(AgentError::MaxIterations)
+        // If LLM returned content without tools, return it
+        if let Some(content) = completion.content {
+            return Ok(content);
+        }
     }
 
+    // Max iterations reached
+    Err(AgentError::MaxIterations)
+}
     async fn execute_tool(&self, call: &ToolCall) -> Result<String, AgentError> {
         let tool = self
             .tools
             .iter()
             .find(|t| t.name() == call.name)
             .ok_or_else(|| AgentError::ToolNotFound(call.name.clone()))?;
-
         tool.execute(call.args.clone()).await
     }
 }
