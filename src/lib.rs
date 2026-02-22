@@ -25,9 +25,17 @@ pub enum AgentError {
     MaxIterations,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    User,
+    Assistant,
+    Tool,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Message {
-    pub role: String, // "user", "assistant"
+    pub role: Role, // "user", "assistant"
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -38,7 +46,7 @@ pub struct Message {
 impl Message {
     pub fn user(content: impl Into<String>) -> Self {
         Self {
-            role: "user".into(),
+            role: Role::User,
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
@@ -47,7 +55,7 @@ impl Message {
 
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
-            role: "assistant".into(),
+            role: Role::Assistant,
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
@@ -56,7 +64,7 @@ impl Message {
 
     pub fn assistant_with_tools(content: impl Into<String>, tool_calls: Value) -> Self {
         Self {
-            role: "assistant".into(),
+            role: Role::Assistant,
             content: content.into(),
             tool_call_id: None,
             tool_calls: Some(tool_calls),
@@ -315,7 +323,12 @@ impl Agent {
 
                     // 🔑 Push result as assistant content instead of role "tool"
                     let msg = format!("Tool '{}' returned: {}", call.name, result);
-                    self.history.push(Message::assistant(msg));
+                    self.history.push(Message {
+                        role: Role::Tool,
+                        content: result,
+                        tool_call_id: Some(call.id.clone()),
+                        tool_calls: None,
+                    });
                 }
                 // Loop again for LLM to see tool results
                 continue;
