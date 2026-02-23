@@ -135,6 +135,12 @@ async fn main() {
 }
 ```
 
+## Example Output
+
+Below is a sample terminal run of the agent:
+
+![Mini-Agent Terminal Output](./assets/terminal-output.png)
+
 Roadmap
 
 - Memory / persistence layer
