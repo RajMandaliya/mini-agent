@@ -11,7 +11,7 @@ use serde_json::Value;
 // (used by OpenRouter + OpenAI — they share the same API shape)
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub(crate) fn build_openai_messages(messages: &[Message]) -> Vec<Value> {
+pub fn build_openai_messages(messages: &[Message]) -> Vec<Value> {
     use serde_json::json;
     messages
         .iter()
@@ -33,7 +33,7 @@ pub(crate) fn build_openai_messages(messages: &[Message]) -> Vec<Value> {
         .collect()
 }
 
-pub(crate) fn build_openai_tools(tools: &[&dyn Tool]) -> Vec<Value> {
+pub fn build_openai_tools(tools: &[&dyn Tool]) -> Vec<Value> {
     use serde_json::json;
     tools
         .iter()
@@ -50,7 +50,7 @@ pub(crate) fn build_openai_tools(tools: &[&dyn Tool]) -> Vec<Value> {
         .collect()
 }
 
-pub(crate) fn parse_openai_completion(json: &Value) -> Result<Completion, AgentError> {
+pub fn parse_openai_completion(json: &Value) -> Result<Completion, AgentError> {
     let choice = json
         .get("choices")
         .and_then(|v| v.as_array())

@@ -1,5 +1,10 @@
 # Mini-Agent (Rust)
 
+![Build](https://github.com/RajMandaliya/mini-agent/actions/workflows/ci.yml/badge.svg)
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Version](https://img.shields.io/badge/version-0.1.0-orange.svg)
+![Rust](https://img.shields.io/badge/rust-async--first-orange.svg)
+
 A **minimal, extensible AI agent framework** in Rust — composable, async-first, and designed for tool-integrated LLM workflows.
 
 Mini-Agent focuses on predictable structure, simple abstractions, and clean separation of concerns between providers, agents, and tools.
@@ -174,18 +179,48 @@ let mut agent = Agent::new(Box::new(provider), model)
 
 ## Supported Providers
 
-| Provider | Struct |
-|----------|--------|
-| OpenRouter | `OpenRouterProvider` |
-| OpenAI | `OpenAiProvider` |
-| Anthropic | `AnthropicProvider` |
-| Ollama | `OllamaProvider` |
+| Provider | Struct | Free Tier |
+|----------|--------|-----------|
+| OpenRouter | `OpenRouterProvider` | ✅ Yes |
+| OpenAI | `OpenAiProvider` | ❌ Paid |
+| Anthropic | `AnthropicProvider` | ❌ Paid |
+| Ollama | `OllamaProvider` | ✅ Local |
 
 ---
 
 ## Example Output
 
 ![Mini-Agent Terminal Output](./assets/terminal-output.png)
+
+---
+
+## Testing
+
+Run the test suite with:
+
+```bash
+cargo test
+```
+
+Unit tests cover core tool logic (add, multiply) and agent error handling. Integration tests require a valid API key set as an environment variable:
+
+```bash
+OPENROUTER_API_KEY=your_key cargo test --test integration
+```
+
+---
+
+## CI
+
+This project uses GitHub Actions for continuous integration. On every push and pull request, the pipeline runs:
+
+```bash
+cargo build
+cargo test
+cargo clippy
+```
+
+See [`.github/workflows/ci.yml`](.github/workflows/ci.yml) for the full workflow definition.
 
 ---
 
