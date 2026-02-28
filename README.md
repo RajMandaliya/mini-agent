@@ -1,6 +1,5 @@
 # Mini-Agent (Rust)
 
-![Build](https://github.com/RajMandaliya/mini-agent/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Version](https://img.shields.io/badge/version-0.1.0-orange.svg)
 ![Rust](https://img.shields.io/badge/rust-async--first-orange.svg)
