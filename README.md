@@ -10,17 +10,17 @@ It is built for developers who want a Rust-native agent core without heavy frame
 
 ## Motivation
 
-Modern AI agents rely on large language models *and* external tools to complete real-world tasks.  
+Modern AI agents rely on large language models *and* external tools to complete real-world tasks.
 
 Most Rust libraries in this space are either experimental, incomplete, or tightly coupled to specific providers.
 
 Mini-Agent aims to provide:
 
-- A clean and understandable agent loop  
-- A provider abstraction layer  
-- Structured tool execution via JSON schema  
-- Async-first design  
-- Extensibility without magic  
+- A clean and understandable agent loop
+- A provider abstraction layer
+- Structured tool execution via JSON schema
+- Async-first design
+- Extensibility without magic
 
 This project prioritizes **clarity over cleverness** and **architecture over hype**.
 
@@ -28,11 +28,12 @@ This project prioritizes **clarity over cleverness** and **architecture over hyp
 
 ## Features
 
-- LLM provider abstraction
+- Multi-provider support (OpenRouter, OpenAI, Anthropic, Ollama)
 - Tool registration and execution
-- JSON-schema based tool interface
+- JSON schema based tool interface
 - Async execution model
 - ReAct-style agent loop
+- Configurable system prompt
 - Simple and composable API surface
 
 ---
@@ -45,76 +46,79 @@ Add to your `Cargo.toml`:
 [dependencies]
 mini-agent = { git = "https://github.com/RajMandaliya/mini-agent" }
 ```
-Architecture
-Core Components
-1. Provider
-- Wraps the LLM API (OpenRouter by default).
-2. Tool
-- Defines executable logic with an input schema and structured output.
-3. Agent
-- Orchestrates conversation flow, tool invocation, and result integration.
 
+---
 
-Execution Flow
-1. user submits a prompt
-2. Agent queries the LLM via Provider
-3. LLM may request a tool call
-4. Agent executes the tool
-5. Tool output is fed back into context
-6. Loop continues until completion
-   
-This implements a structured plan → act → observe cycle.
+## Architecture
 
+### Core Components
 
+**Provider**
+Wraps the LLM API. Implements the `LlmProvider` trait to send messages and return completions. Built-in providers: `OpenRouterProvider`, `OpenAiProvider`, `AnthropicProvider`, `OllamaProvider`.
 
-Example (Single File)
+**Tool**
+Defines executable logic with a JSON schema for inputs and a structured string output. Implement the `Tool` trait to create custom tools.
 
-Below is a complete example showing:
+**Agent**
+Orchestrates conversation flow, tool invocation, and result integration. Maintains message history and drives the ReAct loop.
 
-- Defining a custom tool
+### Execution Flow
 
-- Registering tools
+```
+User prompt
+    │
+    ▼
+Agent sends messages + tools → LLM Provider
+    │
+    ▼
+LLM responds with tool call?
+    ├── Yes → Agent executes tool → result added to context → loop
+    └── No  → Return final answer
+```
 
-- Running the agent
+This implements a structured **plan → act → observe** cycle.
+
+---
+
+## Example
+
+Below is a complete example showing how to define a custom tool, register tools, and run the agent:
 
 ```rust
-  use mini_agent::{
-    agent::Agent,
-    provider::OpenRouterProvider,
-    tool::{Tool, AddNumbersTool}
-};
+use mini_agent::{Agent, OpenRouterProvider, AgentError};
+use mini_agent::Tool;
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 // --- Custom Tool Definition ---
 pub struct MultiplyTool;
 
 #[async_trait]
 impl Tool for MultiplyTool {
-    fn name(&self) -> &'static str { "MultiplyTool" }
+    fn name(&self) -> &'static str {
+        "multiply_numbers"
+    }
 
     fn description(&self) -> &'static str {
-        "Multiplies two numbers"
+        "Multiplies two integers and returns the result"
     }
 
-    fn input_schema(&self) -> Value {
-        serde_json::json!({
+    fn parameters_schema(&self) -> Value {
+        json!({
             "type": "object",
             "properties": {
-                "x": { "type": "number" },
-                "y": { "type": "number" }
+                "a": { "type": "integer" },
+                "b": { "type": "integer" }
             },
-            "required": ["x", "y"]
+            "required": ["a", "b"],
+            "additionalProperties": false
         })
     }
 
-    async fn execute(&self, input: Value) -> Value {
-        let x = input["x"].as_i64().unwrap_or(1);
-        let y = input["y"].as_i64().unwrap_or(1);
-
-        serde_json::json!({
-            "result": x * y
-        })
+    async fn execute(&self, args: Value) -> Result<String, AgentError> {
+        let a = args["a"].as_i64().unwrap_or(0);
+        let b = args["b"].as_i64().unwrap_or(0);
+        Ok((a * b).to_string())
     }
 }
 
@@ -122,12 +126,15 @@ impl Tool for MultiplyTool {
 async fn main() {
     let provider = OpenRouterProvider::new("YOUR_API_KEY");
 
-    let mut agent = Agent::new(provider)
-        .with_tool(Box::new(AddNumbersTool))
-        .with_tool(Box::new(MultiplyTool));
+    let mut agent = Agent::new(
+        Box::new(provider),
+        "mistralai/mistral-7b-instruct:free",
+    );
+
+    agent.add_tool(MultiplyTool);
 
     let result = agent
-        .run("Add 4 and 7, then multiply 3 and 5")
+        .run("Multiply 6 and 7")
         .await
         .unwrap();
 
@@ -135,30 +142,76 @@ async fn main() {
 }
 ```
 
-## Example Output
+### Custom System Prompt
 
-Below is a sample terminal run of the agent:
+You can override the default system prompt using the builder:
+
+```rust
+let mut agent = Agent::new(Box::new(provider), model)
+    .with_system_prompt("You are a math assistant. Only use tools when necessary.");
+```
+
+### Max Steps
+
+Control how many reasoning steps the agent can take before giving up:
+
+```rust
+let mut agent = Agent::new(Box::new(provider), model)
+    .with_max_steps(10);
+```
+
+---
+
+## Built-in Tools
+
+| Tool | Description |
+|------|-------------|
+| `AddNumbersTool` | Adds two integers |
+| `MultiplyNumbersTool` | Multiplies two integers |
+| `JokeTool` | Fetches a random family-friendly joke |
+
+---
+
+## Supported Providers
+
+| Provider | Struct |
+|----------|--------|
+| OpenRouter | `OpenRouterProvider` |
+| OpenAI | `OpenAiProvider` |
+| Anthropic | `AnthropicProvider` |
+| Ollama | `OllamaProvider` |
+
+---
+
+## Example Output
 
 ![Mini-Agent Terminal Output](./assets/terminal-output.png)
 
-Roadmap
+---
 
-- Memory / persistence layer
-- Streaming response support
-- Additional provider implementations (OpenAI, Anthropic, etc.)
-- Multi-agent orchestration
-- Tool registry improvements
+## Roadmap
 
-Contributing
+- [ ] Memory / persistence layer
+- [ ] Streaming response support
+- [ ] Multi-agent orchestration
+- [ ] Tool registry improvements
+- [ ] Expanded test coverage
 
-- Contributions are welcome.
-- Improve provider support.
-- Add tools
+---
+
+## Contributing
+
+Contributions are welcome. You can:
+
+- Add or improve provider support
+- Create new tools
 - Expand agent capabilities
 - Improve documentation and tests
-- Open a PR with a clear description of the change.
 
+Open a PR with a clear description of your change.
 
-License
+---
 
-- MIT License — see the LICENSE file for details.
+## License
+
+MIT License — see the [LICENSE](./LICENSE) file for details.

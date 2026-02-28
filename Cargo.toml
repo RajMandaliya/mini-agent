@@ -1,10 +1,18 @@
 [package]
 name = "mini-agent"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "A tiny, educational AI agent core for Rust"
+description = "A minimal, extensible AI agent framework in Rust with multi-provider support"
 license = "MIT OR Apache-2.0"
-# repository = "https://github.com/yourusername/mini-agent"
+repository = "https://github.com/RajMandaliya/mini-agent"
+
+[lib]
+name = "mini_agent"
+path = "src/lib.rs"
+
+[[example]]
+name = "simple"
+path = "examples/simple.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

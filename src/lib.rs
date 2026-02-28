@@ -1,10 +1,15 @@
+pub mod providers;
+
 use async_trait::async_trait;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fmt;
 use thiserror::Error;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Errors
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Error, Debug)]
 pub enum AgentError {
@@ -25,7 +30,14 @@ pub enum AgentError {
 
     #[error("Max iterations reached")]
     MaxIterations,
+
+    #[error("Provider error: {0}")]
+    ProviderError(String),
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Message / Role
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -61,23 +73,11 @@ pub struct Message {
 
 impl Message {
     pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::User,
-            content: content.into(),
-            tool_call_id: None,
-            tool_calls: None,
-        }
+        Self { role: Role::User, content: content.into(), tool_call_id: None, tool_calls: None }
     }
-
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: content.into(),
-            tool_call_id: None,
-            tool_calls: None,
-        }
+        Self { role: Role::Assistant, content: content.into(), tool_call_id: None, tool_calls: None }
     }
-
     pub fn assistant_with_tools(content: impl Into<String>, tool_calls: Value) -> Self {
         Self {
             role: Role::Assistant,
@@ -87,6 +87,10 @@ impl Message {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ToolCall / Completion
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct ToolCall {
@@ -102,6 +106,10 @@ pub struct Completion {
     pub raw_tool_calls: Option<Value>,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Tool trait
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[async_trait]
 pub trait Tool: Send + Sync + 'static {
     fn name(&self) -> &'static str;
@@ -110,8 +118,14 @@ pub trait Tool: Send + Sync + 'static {
     async fn execute(&self, args: Value) -> Result<String, AgentError>;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// LlmProvider trait
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
+    fn provider_name(&self) -> &str;
+
     async fn complete(
         &self,
         messages: &[Message],
@@ -120,141 +134,25 @@ pub trait LlmProvider: Send + Sync {
     ) -> Result<Completion, AgentError>;
 }
 
-pub struct OpenRouterProvider {
-    client: Client,
-    api_key: String,
-    model: String,
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Re-export built-in providers
+// ─────────────────────────────────────────────────────────────────────────────
 
-impl OpenRouterProvider {
-    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self {
-            client: Client::new(),
-            api_key: api_key.into(),
-            model: model.into(),
-        }
-    }
-}
+pub use providers::openrouter::OpenRouterProvider;
+pub use providers::openai::OpenAiProvider;
+pub use providers::anthropic::AnthropicProvider;
+pub use providers::ollama::OllamaProvider;
 
-#[async_trait]
-impl LlmProvider for OpenRouterProvider {
-    async fn complete(
-        &self,
-        messages: &[Message],
-        tools: &[&dyn Tool],
-        _model_override: &str,
-    ) -> Result<Completion, AgentError> {
-        const URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-
-        let msgs_json: Vec<Value> = messages
-            .iter()
-            .map(|m| {
-                let mut obj = json!({
-                    "role": m.role,
-                    "content": m.content,
-                });
-                if let Some(id) = &m.tool_call_id {
-                    obj["tool_call_id"] = json!(id);
-                }
-                obj
-            })
-            .collect();
-
-        let tools_json: Vec<Value> = tools
-            .iter()
-            .map(|t| {
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name(),
-                        "description": t.description(),
-                        "parameters": t.parameters_schema(),
-                    }
-                })
-            })
-            .collect();
-
-        let body = json!({
-            "model": self.model,
-            "messages": msgs_json,
-            "tools": if tools_json.is_empty() { Value::Null } else { json!(tools_json) },
-            "tool_choice": "auto",
-            "temperature": 0.7,
-            "max_tokens": 1024,
-        });
-
-        let response = self
-            .client
-            .post(URL)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("HTTP-Referer", "https://github.com/YOUR_USERNAME/mini-agent")
-            .header("X-Title", "mini-agent Rust demo")
-            .json(&body)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body_text = response.text().await.unwrap_or_default();
-            return Err(AgentError::InvalidResponse(format!(
-                "OpenRouter returned {}: {}",
-                status, body_text
-            )));
-        }
-
-        let json: Value = response.json().await?;
-        let choice = json
-            .get("choices")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .ok_or_else(|| AgentError::InvalidResponse("missing 'choices'".to_string()))?;
-
-        let message = choice
-            .get("message")
-            .ok_or_else(|| AgentError::InvalidResponse("missing 'message'".to_string()))?;
-
-        let content = message.get("content").and_then(|v| v.as_str()).map(str::to_string);
-
-        let mut tool_calls = Vec::new();
-        let raw_tool_calls = message.get("tool_calls").cloned();
-
-        if let Some(calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
-            for call in calls {
-                let id = call.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let function = call.get("function").ok_or_else(|| {
-                    AgentError::InvalidResponse("missing function in tool call".to_string())
-                })?;
-                let name = function.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let args_value = function.get("arguments").ok_or_else(|| {
-                    AgentError::InvalidResponse("missing arguments".to_string())
-                })?;
-                let args: Value = if let Some(s) = args_value.as_str() {
-                    serde_json::from_str(s).map_err(|e| {
-                        AgentError::InvalidResponse(format!("invalid tool args string: {}", e))
-                    })?
-                } else {
-                    args_value.clone()
-                };
-                tool_calls.push(ToolCall { id, name, args });
-            }
-        }
-
-        Ok(Completion {
-            content,
-            tool_calls,
-            raw_tool_calls,
-        })
-    }
-}
-
-/// -------------------- TOOLS --------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// Built-in Tools
+// ─────────────────────────────────────────────────────────────────────────────
 
 pub struct AddNumbersTool;
 
 #[async_trait]
 impl Tool for AddNumbersTool {
     fn name(&self) -> &'static str { "add_numbers" }
-    fn description(&self) -> &'static str { "Adds two integers and returns the result as a string" }
+    fn description(&self) -> &'static str { "Adds two integers and returns the result" }
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -262,11 +160,10 @@ impl Tool for AddNumbersTool {
                 "a": { "type": "integer" },
                 "b": { "type": "integer" }
             },
-            "required": ["a","b"],
+            "required": ["a", "b"],
             "additionalProperties": false
         })
     }
-
     async fn execute(&self, args: Value) -> Result<String, AgentError> {
         let a = args["a"].as_i64().ok_or_else(|| AgentError::ToolError("Missing 'a'".into()))?;
         let b = args["b"].as_i64().ok_or_else(|| AgentError::ToolError("Missing 'b'".into()))?;
@@ -279,7 +176,7 @@ pub struct MultiplyNumbersTool;
 #[async_trait]
 impl Tool for MultiplyNumbersTool {
     fn name(&self) -> &'static str { "multiply_numbers" }
-    fn description(&self) -> &'static str { "Multiplies two integers and returns the result as a string" }
+    fn description(&self) -> &'static str { "Multiplies two integers and returns the result" }
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -287,11 +184,10 @@ impl Tool for MultiplyNumbersTool {
                 "a": { "type": "integer" },
                 "b": { "type": "integer" }
             },
-            "required": ["a","b"],
+            "required": ["a", "b"],
             "additionalProperties": false
         })
     }
-
     async fn execute(&self, args: Value) -> Result<String, AgentError> {
         let a = args["a"].as_i64().ok_or_else(|| AgentError::ToolError("Missing 'a'".into()))?;
         let b = args["b"].as_i64().ok_or_else(|| AgentError::ToolError("Missing 'b'".into()))?;
@@ -304,29 +200,31 @@ pub struct JokeTool;
 #[async_trait]
 impl Tool for JokeTool {
     fn name(&self) -> &'static str { "get_joke" }
-    fn description(&self) -> &'static str { "Fetches a joke from JokeAPI and returns the text" }
+    fn description(&self) -> &'static str { "Fetches a random family-friendly joke and returns it" }
     fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        })
+        json!({ "type": "object", "properties": {}, "additionalProperties": false })
     }
-
     async fn execute(&self, _args: Value) -> Result<String, AgentError> {
-        let url = "https://v2.jokeapi.dev/joke/Any";
+        // Blacklist offensive categories
+        let url = "https://v2.jokeapi.dev/joke/Any?blacklistFlags=nsfw,racist,sexist,explicit,religious,political";
         let body = reqwest::get(url).await?.text().await?;
         let json: Value = serde_json::from_str(&body)?;
         let joke = if json["type"] == "single" {
-            json["joke"].as_str().unwrap_or("").to_string()
+            json["joke"].as_str().unwrap_or("No joke found").to_string()
         } else {
-            format!("{} {}", json["setup"].as_str().unwrap_or(""), json["delivery"].as_str().unwrap_or(""))
+            format!(
+                "{} {}",
+                json["setup"].as_str().unwrap_or(""),
+                json["delivery"].as_str().unwrap_or("")
+            )
         };
         Ok(joke)
     }
 }
 
-/// -------------------- AGENT --------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// Agent
+// ─────────────────────────────────────────────────────────────────────────────
 
 pub struct Agent {
     pub provider: Box<dyn LlmProvider>,
@@ -334,6 +232,7 @@ pub struct Agent {
     pub tools: Vec<Box<dyn Tool>>,
     pub history: Vec<Message>,
     pub max_steps: usize,
+    pub system_prompt: String,
 }
 
 impl Agent {
@@ -344,6 +243,7 @@ impl Agent {
             tools: vec![],
             history: vec![],
             max_steps: 6,
+            system_prompt: "You are a helpful assistant. Only call tools that are directly needed to answer the question. Never call unrelated tools. Once you receive a tool result, use it to give the final answer immediately.".to_string(),
         }
     }
 
@@ -351,68 +251,103 @@ impl Agent {
         self.tools.push(Box::new(tool));
     }
 
+    pub fn with_max_steps(mut self, steps: usize) -> Self {
+        self.max_steps = steps;
+        self
+    }
+
+    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.system_prompt = prompt.into();
+        self
+    }
+
     pub async fn run(&mut self, user_input: &str) -> Result<String, AgentError> {
-    self.history.push(Message::user(user_input));
-    let mut executed_tool_calls = HashSet::new();
+        self.history.push(Message::user(user_input));
+        let mut executed_tool_calls = HashSet::new();
 
-    for _ in 0..self.max_steps {
-        // Prepare tool references
-        let tool_refs: Vec<&dyn Tool> = self.tools.iter().map(|t| t.as_ref()).collect();
+        for step in 0..self.max_steps {
+            let tool_refs: Vec<&dyn Tool> = self.tools.iter().map(|t| t.as_ref()).collect();
 
-        // Get completion from LLM
-        let completion = self
-            .provider
-            .complete(&self.history, &tool_refs, &self.model)
-            .await?;
+            // Inject system prompt as first message on every call
+            let mut messages = vec![Message {
+                role: Role::User,
+                content: format!("[SYSTEM]: {}", self.system_prompt),
+                tool_call_id: None,
+                tool_calls: None,
+            }];
+            messages.extend(self.history.clone());
 
-        // Push assistant message (with tool_calls if present)
-        self.history.push(Message::assistant_with_tools(
-            completion.content.clone().unwrap_or_default(),
-            completion.raw_tool_calls.clone().unwrap_or(Value::Null),
-        ));
+            let completion = self
+                .provider
+                .complete(&messages, &tool_refs, &self.model)
+                .await
+                .map_err(|e| {
+                    AgentError::ProviderError(format!(
+                        "[{}] step {}: {}",
+                        self.provider.provider_name(),
+                        step,
+                        e
+                    ))
+                })?;
 
-        // Execute any new tool calls
-        if !completion.tool_calls.is_empty() {
+            let content = completion.content.clone().unwrap_or_default();
+            let tool_calls = completion.tool_calls.clone();
+            let raw_tool_calls = completion.raw_tool_calls.clone().unwrap_or(Value::Null);
+
+            self.history.push(Message::assistant_with_tools(
+                content.clone(),
+                raw_tool_calls,
+            ));
+
+            // No tool calls — final answer
+            if tool_calls.is_empty() {
+                if !content.is_empty() {
+                    return Ok(content);
+                }
+                return Err(AgentError::ProviderError("Empty response from model".to_string()));
+            }
+
+            // Execute tools
             let mut executed_any = false;
-
-            for call in &completion.tool_calls {
+            for call in &tool_calls {
                 if executed_tool_calls.contains(&call.id) {
-                    continue; // skip already executed
+                    continue;
                 }
 
-                println!("Executing tool: {}", call.name);
+                println!(
+                    "[{}] Executing tool: {}",
+                    self.provider.provider_name(),
+                    call.name
+                );
                 let result = self.execute_tool(call).await?;
                 executed_tool_calls.insert(call.id.clone());
 
-                // Push tool result to history
                 self.history.push(Message {
                     role: Role::Tool,
-                    content: result.clone(),
+                    content: result,
                     tool_call_id: Some(call.id.clone()),
                     tool_calls: None,
                 });
 
                 executed_any = true;
-
-                // Return first executed tool result immediately
-                return Ok(result);
             }
 
-            // If any new tool was executed, loop again to let LLM see results
-            if executed_any {
-                continue;
+            if !executed_any {
+                // All were duplicates
+                if !content.is_empty() {
+                    return Ok(content);
+                }
+                return Err(AgentError::ProviderError(
+                    "Duplicate tool calls with no content".to_string(),
+                ));
             }
+
+            // Loop back to get model's response to tool results
         }
 
-        // If LLM returned content without tools, return it
-        if let Some(content) = completion.content {
-            return Ok(content);
-        }
+        Err(AgentError::MaxIterations)
     }
 
-    // Max iterations reached
-    Err(AgentError::MaxIterations)
-}
     async fn execute_tool(&self, call: &ToolCall) -> Result<String, AgentError> {
         let tool = self
             .tools
