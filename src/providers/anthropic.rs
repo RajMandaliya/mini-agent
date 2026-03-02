@@ -39,7 +39,7 @@ impl LlmProvider for AnthropicProvider {
         // ── Convert messages ───────────────────────────────────────────────
         // Anthropic separates system messages and uses a content-block format
         // for tool results. We extract an optional leading system message.
-        let mut system_prompt: Option<String> = None;
+        let system_prompt: Option<String> = None;
         let mut anthropic_messages: Vec<Value> = vec![];
 
         for msg in messages {
