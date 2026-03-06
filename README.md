@@ -35,9 +35,8 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mini-agent = { git = "https://github.com/RajMandaliya/mini-agent" }
+crates.io: `mini-agent = "0.1.0"`
 ```
-
 ---
 
 ## Quick Start

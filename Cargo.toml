@@ -1,10 +1,13 @@
 [package]
 name = "mini-agent"
-version = "0.2.0"
+version = "0.1.0"
 edition = "2021"
-description = "A minimal, extensible AI agent framework in Rust with multi-provider support"
-license = "MIT OR Apache-2.0"
+description = "A minimal, extensible AI agent framework — async-first, multi-provider, tool-integrated"
+license = "MIT"
 repository = "https://github.com/RajMandaliya/mini-agent"
+readme = "README.md"
+keywords = ["ai", "agent", "llm", "async", "tools"]
+categories = ["api-bindings", "asynchronous"]
 
 [lib]
 name = "mini_agent"
