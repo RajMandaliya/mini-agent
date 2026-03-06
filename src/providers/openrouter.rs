@@ -61,7 +61,11 @@ impl LlmProvider for OpenRouterProvider {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let text = response.text().await.unwrap_or_default();
-            return Err(AgentError::InvalidResponse(format!("OpenRouter {status}: {text}")));
+            let message = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|j| j["error"]["message"].as_str().map(str::to_string))
+                .unwrap_or(text);
+            return Err(AgentError::provider("OpenRouter", message, Some(status)));
         }
 
         let json: serde_json::Value = response.json().await?;

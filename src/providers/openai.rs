@@ -59,7 +59,12 @@ impl LlmProvider for OpenAiProvider {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let text = response.text().await.unwrap_or_default();
-            return Err(AgentError::InvalidResponse(format!("OpenAI {status}: {text}")));
+            // Try to extract the OpenAI error message for a cleaner error
+            let message = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|j| j["error"]["message"].as_str().map(str::to_string))
+                .unwrap_or(text);
+            return Err(AgentError::provider("OpenAI", message, Some(status)));
         }
 
         let json: serde_json::Value = response.json().await?;

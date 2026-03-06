@@ -44,8 +44,11 @@ mod tool_tests {
         let result = tool.execute(json!({ "b": 5 })).await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            AgentError::ToolError(msg) => assert!(msg.contains("Missing 'a'")),
-            _ => panic!("Expected ToolError"),
+            AgentError::ToolExecution { tool, reason } => {
+                assert_eq!(tool, "add_numbers");
+                assert!(reason.contains("'a'"));
+            }
+            _ => panic!("Expected ToolExecution"),
         }
     }
 
@@ -55,8 +58,11 @@ mod tool_tests {
         let result = tool.execute(json!({ "a": 5 })).await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            AgentError::ToolError(msg) => assert!(msg.contains("Missing 'b'")),
-            _ => panic!("Expected ToolError"),
+            AgentError::ToolExecution { tool, reason } => {
+                assert_eq!(tool, "add_numbers");
+                assert!(reason.contains("'b'"));
+            }
+            _ => panic!("Expected ToolExecution"),
         }
     }
 
@@ -102,6 +108,13 @@ mod tool_tests {
         let tool = MultiplyNumbersTool;
         let result = tool.execute(json!({ "b": 5 })).await;
         assert!(result.is_err());
+        match result.unwrap_err() {
+            AgentError::ToolExecution { tool, reason } => {
+                assert_eq!(tool, "multiply_numbers");
+                assert!(reason.contains("'a'"));
+            }
+            _ => panic!("Expected ToolExecution"),
+        }
     }
 
     #[tokio::test]
@@ -109,6 +122,13 @@ mod tool_tests {
         let tool = MultiplyNumbersTool;
         let result = tool.execute(json!({ "a": 5 })).await;
         assert!(result.is_err());
+        match result.unwrap_err() {
+            AgentError::ToolExecution { tool, reason } => {
+                assert_eq!(tool, "multiply_numbers");
+                assert!(reason.contains("'b'"));
+            }
+            _ => panic!("Expected ToolExecution"),
+        }
     }
 
     // ── Tool metadata ─────────────────────────────────────────────────────
@@ -174,7 +194,11 @@ mod message_tests {
 
     #[test]
     fn assistant_with_tools_construction() {
-        let calls = json!([{ "id": "call_1", "type": "function", "function": { "name": "add_numbers", "arguments": "{\"a\":1,\"b\":2}" } }]);
+        let calls = json!([{
+            "id": "call_1",
+            "type": "function",
+            "function": { "name": "add_numbers", "arguments": "{\"a\":1,\"b\":2}" }
+        }]);
         let msg = Message::assistant_with_tools("", calls.clone());
         assert_eq!(msg.role, Role::Assistant);
         assert_eq!(msg.tool_calls, Some(calls));
@@ -207,7 +231,10 @@ mod message_tests {
 
 #[cfg(test)]
 mod agent_tests {
-    use mini_agent::{Agent, AddNumbersTool, MultiplyNumbersTool, AgentError, Completion, LlmProvider, Message, Tool};
+    use mini_agent::{
+        Agent, AddNumbersTool, MultiplyNumbersTool, AgentError, Completion,
+        LlmProvider, Message, Tool,
+    };
     use async_trait::async_trait;
     use serde_json::json;
 
@@ -235,7 +262,7 @@ mod agent_tests {
         }
     }
 
-    // ── Mock provider that always returns an error ────────────────────────
+    // ── Mock provider that always returns a provider error ────────────────
 
     struct ErrorProvider;
 
@@ -249,11 +276,11 @@ mod agent_tests {
             _tools: &[&dyn Tool],
             _model: &str,
         ) -> Result<Completion, AgentError> {
-            Err(AgentError::ProviderError("Simulated provider failure".into()))
+            Err(AgentError::provider("ErrorMock", "Simulated provider failure", Some(500)))
         }
     }
 
-    // ── Mock provider that returns empty content ──────────────────────────
+    // ── Mock provider that returns empty content with no tool calls ───────
 
     struct EmptyProvider;
 
@@ -275,7 +302,7 @@ mod agent_tests {
         }
     }
 
-    // ── Mock provider that calls a tool once then returns a final answer ──
+    // ── Mock provider that calls a tool once, then returns a final answer ─
 
     struct ToolCallingProvider {
         call_count: std::sync::Arc<std::sync::Mutex<usize>>,
@@ -294,7 +321,6 @@ mod agent_tests {
             let mut count = self.call_count.lock().unwrap();
             *count += 1;
             if *count == 1 {
-                // First call: request a tool
                 Ok(Completion {
                     content: None,
                     tool_calls: vec![mini_agent::ToolCall {
@@ -309,7 +335,6 @@ mod agent_tests {
                     }])),
                 })
             } else {
-                // Second call: return final answer
                 Ok(Completion {
                     content: Some("The answer is 30".to_string()),
                     tool_calls: vec![],
@@ -319,7 +344,42 @@ mod agent_tests {
         }
     }
 
-    // ── Tests ─────────────────────────────────────────────────────────────
+    // ── Mock provider that loops forever (hits max_steps) ─────────────────
+
+    struct InfiniteToolProvider;
+
+    #[async_trait]
+    impl LlmProvider for InfiniteToolProvider {
+        fn provider_name(&self) -> &str { "InfiniteMock" }
+
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[&dyn Tool],
+            _model: &str,
+        ) -> Result<Completion, AgentError> {
+            // Always requests a tool — never gives a final answer
+            Ok(Completion {
+                content: None,
+                tool_calls: vec![mini_agent::ToolCall {
+                    id: format!("call_{}", uuid_stub()),
+                    name: "add_numbers".to_string(),
+                    args: json!({ "a": 1, "b": 1 }),
+                }],
+                raw_tool_calls: Some(json!([])),
+            })
+        }
+    }
+
+    // Simple unique-ID stub so each tool call gets a fresh ID (avoids the
+    // duplicate-call-id short-circuit in the agent loop).
+    fn uuid_stub() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        CTR.fetch_add(1, Ordering::Relaxed)
+    }
+
+    // ── Agent configuration ───────────────────────────────────────────────
 
     #[test]
     fn agent_default_config() {
@@ -335,8 +395,7 @@ mod agent_tests {
     #[test]
     fn agent_with_max_steps() {
         let provider = MockProvider { response: "hi".into() };
-        let agent = Agent::new(Box::new(provider), "test-model")
-            .with_max_steps(20);
+        let agent = Agent::new(Box::new(provider), "test-model").with_max_steps(20);
         assert_eq!(agent.max_steps, 20);
     }
 
@@ -358,6 +417,8 @@ mod agent_tests {
         agent.add_tool(MultiplyNumbersTool);
         assert_eq!(agent.tools.len(), 2);
     }
+
+    // ── Agent run ─────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn agent_run_returns_text_response() {
@@ -382,8 +443,12 @@ mod agent_tests {
         let result = agent.run("anything").await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            AgentError::ProviderError(msg) => assert!(msg.contains("Simulated provider failure")),
-            _ => panic!("Expected ProviderError"),
+            AgentError::Provider { provider, message, status } => {
+                assert_eq!(provider, "ErrorMock");
+                assert!(message.contains("Simulated provider failure"));
+                assert_eq!(status, Some(500));
+            }
+            _ => panic!("Expected Provider error"),
         }
     }
 
@@ -393,8 +458,10 @@ mod agent_tests {
         let result = agent.run("anything").await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            AgentError::ProviderError(msg) => assert!(msg.contains("Empty response")),
-            _ => panic!("Expected ProviderError for empty response"),
+            AgentError::Provider { message, .. } => {
+                assert!(message.contains("empty response"));
+            }
+            _ => panic!("Expected Provider error for empty response"),
         }
     }
 
@@ -408,7 +475,7 @@ mod agent_tests {
         let result = agent.run("Add 10 and 20").await.unwrap();
         assert_eq!(result, "The answer is 30");
 
-        // Provider should have been called twice: once for tool call, once for final answer
+        // Provider should be called twice: once for tool call, once for final answer
         assert_eq!(*call_count.lock().unwrap(), 2);
     }
 
@@ -430,12 +497,12 @@ mod agent_tests {
 
     #[tokio::test]
     async fn agent_tool_not_found_returns_error() {
-        // Provider calls a tool that isn't registered
+        // Provider requests a tool that isn't registered on the agent
         let provider = ToolCallingProvider {
             call_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
         };
-        // Don't register AddNumbersTool — agent should fail with ToolNotFound
         let mut agent = Agent::new(Box::new(provider), "test-model");
+        // AddNumbersTool deliberately not registered
 
         let result = agent.run("Add 10 and 20").await;
         assert!(result.is_err());
@@ -443,6 +510,34 @@ mod agent_tests {
             AgentError::ToolNotFound(name) => assert_eq!(name, "add_numbers"),
             _ => panic!("Expected ToolNotFound"),
         }
+    }
+
+    #[tokio::test]
+    async fn agent_hits_max_steps_returns_error() {
+        let mut agent = Agent::new(Box::new(InfiniteToolProvider), "test-model")
+            .with_max_steps(3);
+        agent.add_tool(AddNumbersTool);
+
+        let result = agent.run("loop forever").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AgentError::MaxSteps(n) => assert_eq!(n, 3),
+            _ => panic!("Expected MaxSteps error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_error_is_retryable_for_500() {
+        let err = AgentError::provider("SomeProvider", "internal server error", Some(500));
+        assert!(err.is_retryable());
+        assert!(!err.is_client_error());
+    }
+
+    #[tokio::test]
+    async fn agent_error_is_client_error_for_401() {
+        let err = AgentError::provider("SomeProvider", "invalid api key", Some(401));
+        assert!(err.is_client_error());
+        assert!(!err.is_retryable());
     }
 }
 
@@ -464,7 +559,11 @@ mod provider_helper_tests {
         fn name(&self) -> &'static str { "dummy_tool" }
         fn description(&self) -> &'static str { "A dummy tool for testing" }
         fn parameters_schema(&self) -> Value {
-            json!({ "type": "object", "properties": { "x": { "type": "integer" } }, "required": ["x"] })
+            json!({
+                "type": "object",
+                "properties": { "x": { "type": "integer" } },
+                "required": ["x"]
+            })
         }
         async fn execute(&self, _args: Value) -> Result<String, AgentError> {
             Ok("dummy_result".to_string())
@@ -541,10 +640,7 @@ mod provider_helper_tests {
     fn parse_completion_text_only() {
         let json = json!({
             "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "Hello world"
-                }
+                "message": { "role": "assistant", "content": "Hello world" }
             }]
         });
         let completion = parse_openai_completion(&json).unwrap();
@@ -585,7 +681,9 @@ mod provider_helper_tests {
         let result = parse_openai_completion(&json);
         assert!(result.is_err());
         match result.unwrap_err() {
-            AgentError::InvalidResponse(msg) => assert!(msg.contains("choices")),
+            AgentError::InvalidResponse { message, .. } => {
+                assert!(message.contains("choices"));
+            }
             _ => panic!("Expected InvalidResponse"),
         }
     }
@@ -595,6 +693,10 @@ mod provider_helper_tests {
         let json = json!({ "choices": [] });
         let result = parse_openai_completion(&json);
         assert!(result.is_err());
+        match result.unwrap_err() {
+            AgentError::InvalidResponse { .. } => {}
+            _ => panic!("Expected InvalidResponse"),
+        }
     }
 
     #[test]
@@ -617,20 +719,45 @@ mod provider_helper_tests {
         });
         let result = parse_openai_completion(&json);
         assert!(result.is_err());
+        match result.unwrap_err() {
+            AgentError::InvalidResponse { message, .. } => {
+                assert!(message.contains("some_tool"));
+            }
+            _ => panic!("Expected InvalidResponse with tool name context"),
+        }
     }
 
     #[test]
     fn parse_completion_null_content() {
         let json = json!({
             "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": null
-                }
+                "message": { "role": "assistant", "content": null }
             }]
         });
         let completion = parse_openai_completion(&json).unwrap();
         assert!(completion.content.is_none());
+    }
+
+    #[test]
+    fn parse_completion_missing_function_field_returns_error() {
+        let json = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{ "id": "call_1", "type": "function" }]
+                    // "function" field is missing entirely
+                }
+            }]
+        });
+        let result = parse_openai_completion(&json);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AgentError::InvalidResponse { message, .. } => {
+                assert!(message.contains("function"));
+            }
+            _ => panic!("Expected InvalidResponse"),
+        }
     }
 }
 
@@ -645,31 +772,51 @@ mod error_tests {
     #[test]
     fn tool_not_found_display() {
         let err = AgentError::ToolNotFound("my_tool".to_string());
-        assert!(err.to_string().contains("my_tool"));
+        let msg = err.to_string();
+        assert!(msg.contains("my_tool"));
+        assert!(msg.contains("add_tool"));  // hint text
     }
 
     #[test]
-    fn tool_error_display() {
-        let err = AgentError::ToolError("bad input".to_string());
-        assert!(err.to_string().contains("bad input"));
+    fn tool_execution_display() {
+        let err = AgentError::tool_exec("my_tool", "bad input");
+        let msg = err.to_string();
+        assert!(msg.contains("my_tool"));
+        assert!(msg.contains("bad input"));
     }
 
     #[test]
-    fn max_iterations_display() {
-        let err = AgentError::MaxIterations;
-        assert!(!err.to_string().is_empty());
+    fn max_steps_display_includes_limit() {
+        let err = AgentError::MaxSteps(10);
+        let msg = err.to_string();
+        assert!(msg.contains("10"));
     }
 
     #[test]
-    fn invalid_response_display() {
-        let err = AgentError::InvalidResponse("missing field".to_string());
-        assert!(err.to_string().contains("missing field"));
+    fn invalid_response_display_includes_provider() {
+        let err = AgentError::invalid("OpenAI", "missing field");
+        let msg = err.to_string();
+        assert!(msg.contains("OpenAI"));
+        assert!(msg.contains("missing field"));
     }
 
     #[test]
-    fn provider_error_display() {
-        let err = AgentError::ProviderError("timeout".to_string());
-        assert!(err.to_string().contains("timeout"));
+    fn provider_error_display_includes_status() {
+        let err = AgentError::provider("Anthropic", "rate limited", Some(429));
+        let msg = err.to_string();
+        assert!(msg.contains("Anthropic"));
+        assert!(msg.contains("rate limited"));
+        assert!(msg.contains("429"));
+    }
+
+    #[test]
+    fn provider_error_display_without_status() {
+        let err = AgentError::provider("Ollama", "connection refused", None);
+        let msg = err.to_string();
+        assert!(msg.contains("Ollama"));
+        assert!(msg.contains("connection refused"));
+        // No HTTP status in message
+        assert!(!msg.contains("HTTP"));
     }
 
     #[test]
@@ -678,5 +825,30 @@ mod error_tests {
         let serde_err = serde_json::from_str::<serde_json::Value>(bad_json).unwrap_err();
         let agent_err: AgentError = serde_err.into();
         assert!(matches!(agent_err, AgentError::Json(_)));
+    }
+
+    #[test]
+    fn is_retryable_for_5xx() {
+        assert!(AgentError::provider("X", "err", Some(500)).is_retryable());
+        assert!(AgentError::provider("X", "err", Some(503)).is_retryable());
+    }
+
+    #[test]
+    fn is_not_retryable_for_4xx() {
+        assert!(!AgentError::provider("X", "err", Some(400)).is_retryable());
+        assert!(!AgentError::provider("X", "err", Some(401)).is_retryable());
+        assert!(!AgentError::provider("X", "err", Some(404)).is_retryable());
+    }
+
+    #[test]
+    fn is_client_error_for_4xx() {
+        assert!(AgentError::provider("X", "err", Some(400)).is_client_error());
+        assert!(AgentError::provider("X", "err", Some(401)).is_client_error());
+        assert!(AgentError::provider("X", "err", Some(422)).is_client_error());
+    }
+
+    #[test]
+    fn is_not_client_error_for_5xx() {
+        assert!(!AgentError::provider("X", "err", Some(500)).is_client_error());
     }
 }

@@ -13,26 +13,70 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AgentError {
-    #[error("LLM request failed: {0}")]
-    LlmError(#[from] reqwest::Error),
+    /// A network-level error from `reqwest` (connection refused, timeout, etc.)
+    #[error("Network error: {0}")]
+    Network(#[from] reqwest::Error),
 
+    /// The response body could not be deserialised as JSON.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("Invalid response from LLM: {0}")]
-    InvalidResponse(String),
+    /// The provider returned an unexpected or structurally invalid response.
+    /// Includes the provider name and an explanation.
+    #[error("Invalid response from {provider}: {message}")]
+    InvalidResponse { provider: String, message: String },
 
-    #[error("Tool not found: {0}")]
+    /// The requested tool name was not registered on the agent.
+    #[error("Tool not found: '{0}' — did you forget to call agent.add_tool(…)?")]
     ToolNotFound(String),
 
-    #[error("Tool execution failed: {0}")]
-    ToolError(String),
+    /// A registered tool returned an error during execution.
+    #[error("Tool '{tool}' failed: {reason}")]
+    ToolExecution { tool: String, reason: String },
 
-    #[error("Max iterations reached")]
-    MaxIterations,
+    /// The agent hit its `max_steps` limit without producing a final answer.
+    #[error("Agent reached the maximum of {0} steps without a final answer")]
+    MaxSteps(usize),
 
-    #[error("Provider error: {0}")]
-    ProviderError(String),
+    /// A provider-level error not caused by the network (e.g. bad API key, rate
+    /// limit, upstream 4xx/5xx).  Includes HTTP status when available.
+    #[error("Provider '{provider}' error{}: {message}", .status.map(|s| format!(" (HTTP {s})")).unwrap_or_default())]
+    Provider {
+        provider: String,
+        message: String,
+        /// HTTP status code, if the error came from an HTTP response.
+        status: Option<u16>,
+    },
+}
+
+impl AgentError {
+    /// Convenience constructor used inside provider implementations.
+    pub fn provider(provider: impl Into<String>, message: impl Into<String>, status: Option<u16>) -> Self {
+        Self::Provider { provider: provider.into(), message: message.into(), status }
+    }
+
+    /// Convenience constructor for invalid-response errors.
+    pub fn invalid(provider: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::InvalidResponse { provider: provider.into(), message: message.into() }
+    }
+
+    /// Convenience constructor for tool-execution errors.
+    pub fn tool_exec(tool: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::ToolExecution { tool: tool.into(), reason: reason.into() }
+    }
+
+    /// Returns `true` if the error is a non-retryable client error (4xx).
+    pub fn is_client_error(&self) -> bool {
+        matches!(self, Self::Provider { status: Some(s), .. } if *s >= 400 && *s < 500)
+    }
+
+    /// Returns `true` if the error may be transient and worth retrying (5xx or network).
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Network(_) | Self::Provider { status: Some(500..=599), .. }
+        )
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -165,8 +209,10 @@ impl Tool for AddNumbersTool {
         })
     }
     async fn execute(&self, args: Value) -> Result<String, AgentError> {
-        let a = args["a"].as_i64().ok_or_else(|| AgentError::ToolError("Missing 'a'".into()))?;
-        let b = args["b"].as_i64().ok_or_else(|| AgentError::ToolError("Missing 'b'".into()))?;
+        let a = args["a"].as_i64()
+            .ok_or_else(|| AgentError::tool_exec(self.name(), "missing or invalid field 'a' (expected integer)"))?;
+        let b = args["b"].as_i64()
+            .ok_or_else(|| AgentError::tool_exec(self.name(), "missing or invalid field 'b' (expected integer)"))?;
         Ok((a + b).to_string())
     }
 }
@@ -189,8 +235,10 @@ impl Tool for MultiplyNumbersTool {
         })
     }
     async fn execute(&self, args: Value) -> Result<String, AgentError> {
-        let a = args["a"].as_i64().ok_or_else(|| AgentError::ToolError("Missing 'a'".into()))?;
-        let b = args["b"].as_i64().ok_or_else(|| AgentError::ToolError("Missing 'b'".into()))?;
+        let a = args["a"].as_i64()
+            .ok_or_else(|| AgentError::tool_exec(self.name(), "missing or invalid field 'a' (expected integer)"))?;
+        let b = args["b"].as_i64()
+            .ok_or_else(|| AgentError::tool_exec(self.name(), "missing or invalid field 'b' (expected integer)"))?;
         Ok((a * b).to_string())
     }
 }
@@ -281,13 +329,14 @@ impl Agent {
                 .provider
                 .complete(&messages, &tool_refs, &self.model)
                 .await
-                .map_err(|e| {
-                    AgentError::ProviderError(format!(
-                        "[{}] step {}: {}",
-                        self.provider.provider_name(),
-                        step,
-                        e
-                    ))
+                .map_err(|e| match e {
+                    // Wrap non-provider errors with context about which provider/step failed
+                    AgentError::Network(inner) => AgentError::Provider {
+                        provider: self.provider.provider_name().to_string(),
+                        message: format!("network error at step {step}: {inner}"),
+                        status: None,
+                    },
+                    other => other,
                 })?;
 
             let content = completion.content.clone().unwrap_or_default();
@@ -304,7 +353,11 @@ impl Agent {
                 if !content.is_empty() {
                     return Ok(content);
                 }
-                return Err(AgentError::ProviderError("Empty response from model".to_string()));
+                return Err(AgentError::provider(
+                    self.provider.provider_name(),
+                    "model returned an empty response with no tool calls",
+                    None,
+                ));
             }
 
             // Execute tools
@@ -333,19 +386,21 @@ impl Agent {
             }
 
             if !executed_any {
-                // All were duplicates
+                // All tool call IDs were duplicates — avoid an infinite loop
                 if !content.is_empty() {
                     return Ok(content);
                 }
-                return Err(AgentError::ProviderError(
-                    "Duplicate tool calls with no content".to_string(),
+                return Err(AgentError::provider(
+                    self.provider.provider_name(),
+                    "model repeated already-executed tool calls with no new content",
+                    None,
                 ));
             }
 
             // Loop back to get model's response to tool results
         }
 
-        Err(AgentError::MaxIterations)
+        Err(AgentError::MaxSteps(self.max_steps))
     }
 
     async fn execute_tool(&self, call: &ToolCall) -> Result<String, AgentError> {

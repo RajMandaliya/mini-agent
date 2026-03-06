@@ -38,13 +38,18 @@ impl LlmProvider for AnthropicProvider {
 
         // ── Convert messages ───────────────────────────────────────────────
         // Anthropic separates system messages and uses a content-block format
-        // for tool results. We extract an optional leading system message.
-        let system_prompt: Option<String> = None;
+        // for tool results. We extract an optional leading [SYSTEM] message.
+        let mut system_prompt: Option<String> = None;
         let mut anthropic_messages: Vec<Value> = vec![];
 
         for msg in messages {
             match msg.role {
                 Role::User => {
+                    // Extract a synthetic [SYSTEM] prefix injected by the agent loop
+                    if msg.content.starts_with("[SYSTEM]: ") {
+                        system_prompt = Some(msg.content.trim_start_matches("[SYSTEM]: ").to_string());
+                        continue;
+                    }
                     // A tool result coming back from the agent sits in a "user"
                     // turn in Anthropic's API as a tool_result content block.
                     if let Some(id) = &msg.tool_call_id {
@@ -166,7 +171,12 @@ impl LlmProvider for AnthropicProvider {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let text = response.text().await.unwrap_or_default();
-            return Err(AgentError::InvalidResponse(format!("Anthropic {status}: {text}")));
+            // Anthropic error bodies look like: {"type":"error","error":{"type":"...","message":"..."}}
+            let message = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|j| j["error"]["message"].as_str().map(str::to_string))
+                .unwrap_or(text);
+            return Err(AgentError::provider("Anthropic", message, Some(status)));
         }
 
         let json: Value = response.json().await?;
@@ -175,15 +185,13 @@ impl LlmProvider for AnthropicProvider {
         let content_blocks = json
             .get("content")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| AgentError::InvalidResponse("missing 'content' array".into()))?;
+            .ok_or_else(|| AgentError::invalid("Anthropic", "response missing 'content' array"))?;
 
         let mut text_parts: Vec<String> = vec![];
         let mut tool_calls: Vec<ToolCall> = vec![];
-        // We also build a raw_tool_calls Value in OpenAI shape so the agent
-        // history stores something consistent.
         let mut raw_tool_calls_arr: Vec<Value> = vec![];
 
-        for block in content_blocks {
+        for (i, block) in content_blocks.iter().enumerate() {
             match block.get("type").and_then(|v| v.as_str()) {
                 Some("text") => {
                     if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
@@ -191,13 +199,18 @@ impl LlmProvider for AnthropicProvider {
                     }
                 }
                 Some("tool_use") => {
-                    let id =
-                        block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let name =
-                        block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let id = block
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| AgentError::invalid("Anthropic", format!("tool_use block[{i}] missing 'id'")))?
+                        .to_string();
+                    let name = block
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| AgentError::invalid("Anthropic", format!("tool_use block[{i}] missing 'name'")))?
+                        .to_string();
                     let args = block.get("input").cloned().unwrap_or(json!({}));
 
-                    // Build OpenAI-compatible raw representation for history
                     raw_tool_calls_arr.push(json!({
                         "id": id,
                         "type": "function",
@@ -209,7 +222,12 @@ impl LlmProvider for AnthropicProvider {
 
                     tool_calls.push(ToolCall { id, name, args });
                 }
-                _ => {}
+                Some(other) => {
+                    // Unknown block types are silently skipped — Anthropic may
+                    // add new types in future API versions.
+                    let _ = other;
+                }
+                None => {}
             }
         }
 

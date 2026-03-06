@@ -62,16 +62,21 @@ impl LlmProvider for OllamaProvider {
             .send()
             .await
             .map_err(|e| {
-                AgentError::ProviderError(format!(
-                    "Ollama unreachable at {} — is it running? ({})",
-                    self.base_url, e
-                ))
+                AgentError::provider(
+                    "Ollama",
+                    format!("could not reach Ollama at '{}' — is it running? (`ollama serve`): {}", self.base_url, e),
+                    None,
+                )
             })?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let text = response.text().await.unwrap_or_default();
-            return Err(AgentError::InvalidResponse(format!("Ollama {status}: {text}")));
+            let message = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|j| j["error"].as_str().map(str::to_string))
+                .unwrap_or(text);
+            return Err(AgentError::provider("Ollama", message, Some(status)));
         }
 
         let json: serde_json::Value = response.json().await?;
