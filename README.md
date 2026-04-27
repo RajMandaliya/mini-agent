@@ -1,7 +1,7 @@
 # Mini-Agent (Rust)
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Version](https://img.shields.io/badge/version-0.1.0-orange.svg)
+![Version](https://img.shields.io/badge/version-0.2.0-orange.svg)
 ![Rust](https://img.shields.io/badge/rust-async--first-orange.svg)
 
 A **minimal, extensible AI agent framework** in Rust — composable, async-first, and designed for tool-integrated LLM workflows.
@@ -22,7 +22,7 @@ Mini-Agent aims to provide:
 - A provider abstraction layer that actually works across 4 providers
 - Structured error handling you can pattern match and build retry logic on top of
 - JSON schema based tool interface
-- Async-first design
+- Async-first design with full streaming support
 - Extensibility without magic
 
 This project prioritizes **clarity over cleverness** and **architecture over hype**.
@@ -35,8 +35,9 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-`mini-agent = "0.1.0"`
+mini-agent = "0.2.0"
 ```
+
 ---
 
 ## Quick Start
@@ -59,6 +60,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+---
+
+## Streaming
+
+Stream tokens as they arrive from the LLM instead of waiting for the full response.
+
+### stream_collect() — simplest approach
+
+Streams chunks to stdout and returns the full response as a `String`.
+Adds the response to conversation history automatically.
+
+```rust
+use mini_agent::{Agent, OpenAiProvider};
+use std::env;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let provider = OpenAiProvider::new(env::var("OPENAI_API_KEY")?, "gpt-4o-mini");
+    let mut agent = Agent::new(Box::new(provider), "gpt-4o-mini");
+
+    let answer = agent.stream_collect("Tell me a story about a robot.").await?;
+    println!("\nFull response: {}", answer);
+    Ok(())
+}
+```
+
+### stream() — manual chunk handling
+
+For full control over each chunk as it arrives:
+
+```rust
+use futures::StreamExt;
+
+let mut stream = agent.stream("Tell me a story.").await?;
+
+while let Some(chunk) = stream.next().await {
+    print!("{}", chunk?);
+}
+println!();
+```
+
+### Streaming behaviour
+
+| Situation | Behaviour |
+|-----------|-----------|
+| Provider supports streaming, no tools | True SSE token streaming |
+| Tools registered | Falls back to `complete()`, yields full response as one chunk |
+| Provider doesn't support streaming | Falls back to `complete()` automatically |
+
+Supported providers: **OpenAI**, **OpenRouter**.
+Anthropic and Ollama fall back to `complete()` automatically — no code changes needed.
 
 ---
 
@@ -125,12 +178,12 @@ let provider = OllamaProvider::new("llama3");
 
 ## Supported Providers
 
-| Provider | Struct | Free Tier |
-|----------|--------|-----------|
-| OpenRouter | `OpenRouterProvider` | ✅ Yes |
-| OpenAI | `OpenAiProvider` | ❌ Paid |
-| Anthropic | `AnthropicProvider` | ❌ Paid |
-| Ollama | `OllamaProvider` | ✅ Local |
+| Provider | Struct | Free Tier | Streaming |
+|----------|--------|-----------|-----------|
+| OpenRouter | `OpenRouterProvider` | ✅ Yes | ✅ Yes |
+| OpenAI | `OpenAiProvider` | ❌ Paid | ✅ Yes |
+| Anthropic | `AnthropicProvider` | ❌ Paid | 🔜 Planned |
+| Ollama | `OllamaProvider` | ✅ Local | 🔜 Planned |
 
 ---
 
@@ -157,7 +210,7 @@ match agent.run("Do something").await {
 }
 ```
 
-You can also use the built-in helpers for retry logic:
+Built-in helpers for retry logic:
 
 ```rust
 let err = agent.run("...").await.unwrap_err();
@@ -202,8 +255,13 @@ let mut agent = Agent::new(Box::new(provider), model)
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     fn provider_name(&self) -> &str;
+    fn supports_streaming(&self) -> bool { false }
+
     async fn complete(&self, messages: &[Message], tools: &[&dyn Tool], model: &str)
         -> Result<Completion, AgentError>;
+
+    async fn stream_complete(&self, messages: &[Message], model: &str)
+        -> Result<TokenStream, AgentError>;
 }
 ```
 
@@ -229,7 +287,7 @@ Agent sends messages + tools → LlmProvider
     ▼
 LLM responds with tool call?
     ├── Yes → execute tool → result added to context → loop
-    └── No  → return final answer
+    └── No  → return final answer (streamed or buffered)
 ```
 
 ---
@@ -240,7 +298,9 @@ LLM responds with tool call?
 cargo test
 ```
 
-Unit tests cover tool logic, message construction, agent configuration, provider helpers, and all error variants. Integration tests require a valid API key:
+58 unit tests covering tool logic, message construction, agent configuration, provider helpers, and all error variants.
+
+Integration tests (require API key):
 
 ```bash
 OPENROUTER_API_KEY=your_key cargo test --test integration
@@ -250,13 +310,11 @@ OPENROUTER_API_KEY=your_key cargo test --test integration
 
 ## CI
 
-On every push and pull request, the pipeline runs:
+On every push and pull request:
 
 ```bash
 cargo build && cargo test && cargo clippy
 ```
-
-See [`.github/workflows/ci.yml`](.github/workflows/ci.yml) for details.
 
 ---
 
@@ -269,7 +327,8 @@ See [`.github/workflows/ci.yml`](.github/workflows/ci.yml) for details.
 ## Roadmap
 
 - [ ] Memory / persistence layer
-- [ ] Streaming response support
+- [ ] Anthropic streaming support
+- [ ] Ollama streaming support
 - [ ] Multi-agent orchestration
 - [ ] Tool registry improvements
 - [ ] `docs.rs` documentation pass
