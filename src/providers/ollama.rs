@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::json;
 
-use crate::{AgentError, Completion, LlmProvider, Message, Tool};
 use super::{build_openai_messages, build_openai_tools, parse_openai_completion};
+use crate::{AgentError, Completion, LlmProvider, Message, Tool};
 
 pub struct OllamaProvider {
     client: Client,
@@ -33,7 +33,9 @@ impl OllamaProvider {
 
 #[async_trait]
 impl LlmProvider for OllamaProvider {
-    fn provider_name(&self) -> &str { "Ollama" }
+    fn provider_name(&self) -> &str {
+        "Ollama"
+    }
 
     async fn complete(
         &self,
@@ -41,7 +43,11 @@ impl LlmProvider for OllamaProvider {
         tools: &[&dyn Tool],
         model: &str,
     ) -> Result<Completion, AgentError> {
-        let active_model = if model.is_empty() { &self.default_model } else { model };
+        let active_model = if model.is_empty() {
+            &self.default_model
+        } else {
+            model
+        };
 
         let msgs_json = build_openai_messages(messages);
         let tools_json = build_openai_tools(tools);
@@ -64,7 +70,10 @@ impl LlmProvider for OllamaProvider {
             .map_err(|e| {
                 AgentError::provider(
                     "Ollama",
-                    format!("could not reach Ollama at '{}' — is it running? (`ollama serve`): {}", self.base_url, e),
+                    format!(
+                        "could not reach Ollama at '{}' — is it running? (`ollama serve`): {}",
+                        self.base_url, e
+                    ),
                     None,
                 )
             })?;

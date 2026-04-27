@@ -35,7 +35,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-crates.io: `mini-agent = "0.1.0"`
+`mini-agent = "0.1.0"`
 ```
 ---
 

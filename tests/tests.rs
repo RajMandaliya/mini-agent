@@ -69,7 +69,10 @@ mod tool_tests {
     #[tokio::test]
     async fn add_numbers_large_values() {
         let tool = AddNumbersTool;
-        let result = tool.execute(json!({ "a": 1_000_000, "b": 2_000_000 })).await.unwrap();
+        let result = tool
+            .execute(json!({ "a": 1_000_000, "b": 2_000_000 }))
+            .await
+            .unwrap();
         assert_eq!(result, "3000000");
     }
 
@@ -231,11 +234,11 @@ mod message_tests {
 
 #[cfg(test)]
 mod agent_tests {
-    use mini_agent::{
-        Agent, AddNumbersTool, MultiplyNumbersTool, AgentError, Completion,
-        LlmProvider, Message, Tool,
-    };
     use async_trait::async_trait;
+    use mini_agent::{
+        AddNumbersTool, Agent, AgentError, Completion, LlmProvider, Message, MultiplyNumbersTool,
+        Tool,
+    };
     use serde_json::json;
 
     // ── Mock provider that returns a fixed text response ──────────────────
@@ -246,7 +249,9 @@ mod agent_tests {
 
     #[async_trait]
     impl LlmProvider for MockProvider {
-        fn provider_name(&self) -> &str { "Mock" }
+        fn provider_name(&self) -> &str {
+            "Mock"
+        }
 
         async fn complete(
             &self,
@@ -268,7 +273,9 @@ mod agent_tests {
 
     #[async_trait]
     impl LlmProvider for ErrorProvider {
-        fn provider_name(&self) -> &str { "ErrorMock" }
+        fn provider_name(&self) -> &str {
+            "ErrorMock"
+        }
 
         async fn complete(
             &self,
@@ -276,7 +283,11 @@ mod agent_tests {
             _tools: &[&dyn Tool],
             _model: &str,
         ) -> Result<Completion, AgentError> {
-            Err(AgentError::provider("ErrorMock", "Simulated provider failure", Some(500)))
+            Err(AgentError::provider(
+                "ErrorMock",
+                "Simulated provider failure",
+                Some(500),
+            ))
         }
     }
 
@@ -286,7 +297,9 @@ mod agent_tests {
 
     #[async_trait]
     impl LlmProvider for EmptyProvider {
-        fn provider_name(&self) -> &str { "EmptyMock" }
+        fn provider_name(&self) -> &str {
+            "EmptyMock"
+        }
 
         async fn complete(
             &self,
@@ -310,7 +323,9 @@ mod agent_tests {
 
     #[async_trait]
     impl LlmProvider for ToolCallingProvider {
-        fn provider_name(&self) -> &str { "ToolCallingMock" }
+        fn provider_name(&self) -> &str {
+            "ToolCallingMock"
+        }
 
         async fn complete(
             &self,
@@ -350,7 +365,9 @@ mod agent_tests {
 
     #[async_trait]
     impl LlmProvider for InfiniteToolProvider {
-        fn provider_name(&self) -> &str { "InfiniteMock" }
+        fn provider_name(&self) -> &str {
+            "InfiniteMock"
+        }
 
         async fn complete(
             &self,
@@ -383,7 +400,9 @@ mod agent_tests {
 
     #[test]
     fn agent_default_config() {
-        let provider = MockProvider { response: "hi".into() };
+        let provider = MockProvider {
+            response: "hi".into(),
+        };
         let agent = Agent::new(Box::new(provider), "test-model");
         assert_eq!(agent.model, "test-model");
         assert_eq!(agent.max_steps, 6);
@@ -394,22 +413,28 @@ mod agent_tests {
 
     #[test]
     fn agent_with_max_steps() {
-        let provider = MockProvider { response: "hi".into() };
+        let provider = MockProvider {
+            response: "hi".into(),
+        };
         let agent = Agent::new(Box::new(provider), "test-model").with_max_steps(20);
         assert_eq!(agent.max_steps, 20);
     }
 
     #[test]
     fn agent_with_system_prompt() {
-        let provider = MockProvider { response: "hi".into() };
-        let agent = Agent::new(Box::new(provider), "test-model")
-            .with_system_prompt("Custom prompt here");
+        let provider = MockProvider {
+            response: "hi".into(),
+        };
+        let agent =
+            Agent::new(Box::new(provider), "test-model").with_system_prompt("Custom prompt here");
         assert_eq!(agent.system_prompt, "Custom prompt here");
     }
 
     #[test]
     fn agent_add_tool_increases_count() {
-        let provider = MockProvider { response: "hi".into() };
+        let provider = MockProvider {
+            response: "hi".into(),
+        };
         let mut agent = Agent::new(Box::new(provider), "test-model");
         assert_eq!(agent.tools.len(), 0);
         agent.add_tool(AddNumbersTool);
@@ -422,7 +447,9 @@ mod agent_tests {
 
     #[tokio::test]
     async fn agent_run_returns_text_response() {
-        let provider = MockProvider { response: "Hello from mock!".into() };
+        let provider = MockProvider {
+            response: "Hello from mock!".into(),
+        };
         let mut agent = Agent::new(Box::new(provider), "test-model");
         let result = agent.run("Say hello").await.unwrap();
         assert_eq!(result, "Hello from mock!");
@@ -430,7 +457,9 @@ mod agent_tests {
 
     #[tokio::test]
     async fn agent_run_appends_to_history() {
-        let provider = MockProvider { response: "42".into() };
+        let provider = MockProvider {
+            response: "42".into(),
+        };
         let mut agent = Agent::new(Box::new(provider), "test-model");
         agent.run("What is 6 x 7?").await.unwrap();
         assert!(agent.history.len() >= 2); // at minimum: user + assistant
@@ -443,7 +472,11 @@ mod agent_tests {
         let result = agent.run("anything").await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            AgentError::Provider { provider, message, status } => {
+            AgentError::Provider {
+                provider,
+                message,
+                status,
+            } => {
                 assert_eq!(provider, "ErrorMock");
                 assert!(message.contains("Simulated provider failure"));
                 assert_eq!(status, Some(500));
@@ -468,7 +501,9 @@ mod agent_tests {
     #[tokio::test]
     async fn agent_executes_tool_and_returns_answer() {
         let call_count = std::sync::Arc::new(std::sync::Mutex::new(0));
-        let provider = ToolCallingProvider { call_count: call_count.clone() };
+        let provider = ToolCallingProvider {
+            call_count: call_count.clone(),
+        };
         let mut agent = Agent::new(Box::new(provider), "test-model");
         agent.add_tool(AddNumbersTool);
 
@@ -514,8 +549,7 @@ mod agent_tests {
 
     #[tokio::test]
     async fn agent_hits_max_steps_returns_error() {
-        let mut agent = Agent::new(Box::new(InfiniteToolProvider), "test-model")
-            .with_max_steps(3);
+        let mut agent = Agent::new(Box::new(InfiniteToolProvider), "test-model").with_max_steps(3);
         agent.add_tool(AddNumbersTool);
 
         let result = agent.run("loop forever").await;
@@ -547,17 +581,23 @@ mod agent_tests {
 
 #[cfg(test)]
 mod provider_helper_tests {
-    use mini_agent::providers::{build_openai_messages, build_openai_tools, parse_openai_completion};
-    use mini_agent::{AgentError, Message, Role, Tool};
     use async_trait::async_trait;
+    use mini_agent::providers::{
+        build_openai_messages, build_openai_tools, parse_openai_completion,
+    };
+    use mini_agent::{AgentError, Message, Role, Tool};
     use serde_json::{json, Value};
 
     struct DummyTool;
 
     #[async_trait]
     impl Tool for DummyTool {
-        fn name(&self) -> &'static str { "dummy_tool" }
-        fn description(&self) -> &'static str { "A dummy tool for testing" }
+        fn name(&self) -> &'static str {
+            "dummy_tool"
+        }
+        fn description(&self) -> &'static str {
+            "A dummy tool for testing"
+        }
         fn parameters_schema(&self) -> Value {
             json!({
                 "type": "object",
@@ -623,7 +663,10 @@ mod provider_helper_tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["type"], "function");
         assert_eq!(result[0]["function"]["name"], "dummy_tool");
-        assert_eq!(result[0]["function"]["description"], "A dummy tool for testing");
+        assert_eq!(
+            result[0]["function"]["description"],
+            "A dummy tool for testing"
+        );
         assert!(result[0]["function"]["parameters"].is_object());
     }
 
@@ -774,7 +817,7 @@ mod error_tests {
         let err = AgentError::ToolNotFound("my_tool".to_string());
         let msg = err.to_string();
         assert!(msg.contains("my_tool"));
-        assert!(msg.contains("add_tool"));  // hint text
+        assert!(msg.contains("add_tool")); // hint text
     }
 
     #[test]

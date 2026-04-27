@@ -1,11 +1,21 @@
 pub mod providers;
 
 use async_trait::async_trait;
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fmt;
+use std::pin::Pin;
 use thiserror::Error;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stream type alias
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A pinned, boxed stream of text chunks from the LLM.
+/// Each item is one token or word as it arrives from the provider.
+pub type TokenStream = Pin<Box<dyn Stream<Item = Result<String, AgentError>> + Send>>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Errors
@@ -13,68 +23,70 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AgentError {
-    /// A network-level error from `reqwest` (connection refused, timeout, etc.)
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
 
-    /// The response body could not be deserialised as JSON.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// The provider returned an unexpected or structurally invalid response.
-    /// Includes the provider name and an explanation.
     #[error("Invalid response from {provider}: {message}")]
     InvalidResponse { provider: String, message: String },
 
-    /// The requested tool name was not registered on the agent.
     #[error("Tool not found: '{0}' — did you forget to call agent.add_tool(…)?")]
     ToolNotFound(String),
 
-    /// A registered tool returned an error during execution.
     #[error("Tool '{tool}' failed: {reason}")]
     ToolExecution { tool: String, reason: String },
 
-    /// The agent hit its `max_steps` limit without producing a final answer.
     #[error("Agent reached the maximum of {0} steps without a final answer")]
     MaxSteps(usize),
 
-    /// A provider-level error not caused by the network (e.g. bad API key, rate
-    /// limit, upstream 4xx/5xx).  Includes HTTP status when available.
     #[error("Provider '{provider}' error{}: {message}", .status.map(|s| format!(" (HTTP {s})")).unwrap_or_default())]
     Provider {
         provider: String,
         message: String,
-        /// HTTP status code, if the error came from an HTTP response.
         status: Option<u16>,
     },
+
+    #[error("Provider '{0}' does not support streaming")]
+    StreamingNotSupported(String),
 }
 
 impl AgentError {
-    /// Convenience constructor used inside provider implementations.
-    pub fn provider(provider: impl Into<String>, message: impl Into<String>, status: Option<u16>) -> Self {
-        Self::Provider { provider: provider.into(), message: message.into(), status }
+    pub fn provider(
+        provider: impl Into<String>,
+        message: impl Into<String>,
+        status: Option<u16>,
+    ) -> Self {
+        Self::Provider {
+            provider: provider.into(),
+            message: message.into(),
+            status,
+        }
     }
-
-    /// Convenience constructor for invalid-response errors.
     pub fn invalid(provider: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::InvalidResponse { provider: provider.into(), message: message.into() }
+        Self::InvalidResponse {
+            provider: provider.into(),
+            message: message.into(),
+        }
     }
-
-    /// Convenience constructor for tool-execution errors.
     pub fn tool_exec(tool: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::ToolExecution { tool: tool.into(), reason: reason.into() }
+        Self::ToolExecution {
+            tool: tool.into(),
+            reason: reason.into(),
+        }
     }
-
-    /// Returns `true` if the error is a non-retryable client error (4xx).
     pub fn is_client_error(&self) -> bool {
         matches!(self, Self::Provider { status: Some(s), .. } if *s >= 400 && *s < 500)
     }
-
-    /// Returns `true` if the error may be transient and worth retrying (5xx or network).
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::Network(_) | Self::Provider { status: Some(500..=599), .. }
+            Self::Network(_)
+                | Self::Provider {
+                    status: Some(500..=599),
+                    ..
+                }
         )
     }
 }
@@ -117,10 +129,20 @@ pub struct Message {
 
 impl Message {
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: content.into(), tool_call_id: None, tool_calls: None }
+        Self {
+            role: Role::User,
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: content.into(), tool_call_id: None, tool_calls: None }
+        Self {
+            role: Role::Assistant,
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }
     }
     pub fn assistant_with_tools(content: impl Into<String>, tool_calls: Value) -> Self {
         Self {
@@ -164,6 +186,10 @@ pub trait Tool: Send + Sync + 'static {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LlmProvider trait
+//
+// stream_complete() defaults to returning StreamingNotSupported.
+// Providers that support streaming override it and set supports_streaming()
+// to return true. All existing providers compile without changes.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[async_trait]
@@ -176,84 +202,135 @@ pub trait LlmProvider: Send + Sync {
         tools: &[&dyn Tool],
         model: &str,
     ) -> Result<Completion, AgentError>;
+
+    /// Streaming completion — yields text chunks as they arrive.
+    ///
+    /// Only called when no tools are registered. The agent loop uses
+    /// complete() when tools are present (tool calls can't be streamed
+    /// because parsing requires the full JSON response).
+    ///
+    /// Default: returns StreamingNotSupported. Override to enable streaming.
+    async fn stream_complete(
+        &self,
+        messages: &[Message],
+        model: &str,
+    ) -> Result<TokenStream, AgentError> {
+        let _ = (messages, model);
+        Err(AgentError::StreamingNotSupported(
+            self.provider_name().to_string(),
+        ))
+    }
+
+    /// Returns true if this provider implements stream_complete().
+    fn supports_streaming(&self) -> bool {
+        false
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Re-export built-in providers
+// Re-exports
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub use providers::openrouter::OpenRouterProvider;
-pub use providers::openai::OpenAiProvider;
 pub use providers::anthropic::AnthropicProvider;
 pub use providers::ollama::OllamaProvider;
+pub use providers::openai::OpenAiProvider;
+pub use providers::openrouter::OpenRouterProvider;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SSE parsing helper (shared across OpenAI-compatible streaming providers)
+//
+// OpenAI SSE format:
+//   data: {"choices":[{"delta":{"content":"hello"}}]}
+//   data: [DONE]
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub fn parse_sse_chunk(line: &str) -> Option<String> {
+    let data = line.strip_prefix("data: ")?;
+    if data.trim() == "[DONE]" {
+        return None;
+    }
+    let json: Value = serde_json::from_str(data).ok()?;
+    json["choices"][0]["delta"]["content"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Built-in Tools
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct AddNumbersTool;
-
 #[async_trait]
 impl Tool for AddNumbersTool {
-    fn name(&self) -> &'static str { "add_numbers" }
-    fn description(&self) -> &'static str { "Adds two integers and returns the result" }
+    fn name(&self) -> &'static str {
+        "add_numbers"
+    }
+    fn description(&self) -> &'static str {
+        "Adds two integers and returns the result"
+    }
     fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "a": { "type": "integer" },
-                "b": { "type": "integer" }
-            },
-            "required": ["a", "b"],
-            "additionalProperties": false
-        })
+        json!({"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"additionalProperties":false})
     }
     async fn execute(&self, args: Value) -> Result<String, AgentError> {
-        let a = args["a"].as_i64()
-            .ok_or_else(|| AgentError::tool_exec(self.name(), "missing or invalid field 'a' (expected integer)"))?;
-        let b = args["b"].as_i64()
-            .ok_or_else(|| AgentError::tool_exec(self.name(), "missing or invalid field 'b' (expected integer)"))?;
+        let a = args["a"].as_i64().ok_or_else(|| {
+            AgentError::tool_exec(
+                self.name(),
+                "missing or invalid field 'a' (expected integer)",
+            )
+        })?;
+        let b = args["b"].as_i64().ok_or_else(|| {
+            AgentError::tool_exec(
+                self.name(),
+                "missing or invalid field 'b' (expected integer)",
+            )
+        })?;
         Ok((a + b).to_string())
     }
 }
 
 pub struct MultiplyNumbersTool;
-
 #[async_trait]
 impl Tool for MultiplyNumbersTool {
-    fn name(&self) -> &'static str { "multiply_numbers" }
-    fn description(&self) -> &'static str { "Multiplies two integers and returns the result" }
+    fn name(&self) -> &'static str {
+        "multiply_numbers"
+    }
+    fn description(&self) -> &'static str {
+        "Multiplies two integers and returns the result"
+    }
     fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "a": { "type": "integer" },
-                "b": { "type": "integer" }
-            },
-            "required": ["a", "b"],
-            "additionalProperties": false
-        })
+        json!({"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"additionalProperties":false})
     }
     async fn execute(&self, args: Value) -> Result<String, AgentError> {
-        let a = args["a"].as_i64()
-            .ok_or_else(|| AgentError::tool_exec(self.name(), "missing or invalid field 'a' (expected integer)"))?;
-        let b = args["b"].as_i64()
-            .ok_or_else(|| AgentError::tool_exec(self.name(), "missing or invalid field 'b' (expected integer)"))?;
+        let a = args["a"].as_i64().ok_or_else(|| {
+            AgentError::tool_exec(
+                self.name(),
+                "missing or invalid field 'a' (expected integer)",
+            )
+        })?;
+        let b = args["b"].as_i64().ok_or_else(|| {
+            AgentError::tool_exec(
+                self.name(),
+                "missing or invalid field 'b' (expected integer)",
+            )
+        })?;
         Ok((a * b).to_string())
     }
 }
 
 pub struct JokeTool;
-
 #[async_trait]
 impl Tool for JokeTool {
-    fn name(&self) -> &'static str { "get_joke" }
-    fn description(&self) -> &'static str { "Fetches a random family-friendly joke and returns it" }
+    fn name(&self) -> &'static str {
+        "get_joke"
+    }
+    fn description(&self) -> &'static str {
+        "Fetches a random family-friendly joke and returns it"
+    }
     fn parameters_schema(&self) -> Value {
-        json!({ "type": "object", "properties": {}, "additionalProperties": false })
+        json!({"type":"object","properties":{},"additionalProperties":false})
     }
     async fn execute(&self, _args: Value) -> Result<String, AgentError> {
-        // Blacklist offensive categories
         let url = "https://v2.jokeapi.dev/joke/Any?blacklistFlags=nsfw,racist,sexist,explicit,religious,political";
         let body = reqwest::get(url).await?.text().await?;
         let json: Value = serde_json::from_str(&body)?;
@@ -303,11 +380,12 @@ impl Agent {
         self.max_steps = steps;
         self
     }
-
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = prompt.into();
         self
     }
+
+    // ── Blocking run (unchanged) ──────────────────────────────────────────
 
     pub async fn run(&mut self, user_input: &str) -> Result<String, AgentError> {
         self.history.push(Message::user(user_input));
@@ -315,8 +393,6 @@ impl Agent {
 
         for step in 0..self.max_steps {
             let tool_refs: Vec<&dyn Tool> = self.tools.iter().map(|t| t.as_ref()).collect();
-
-            // Inject system prompt as first message on every call
             let mut messages = vec![Message {
                 role: Role::User,
                 content: format!("[SYSTEM]: {}", self.system_prompt),
@@ -330,7 +406,6 @@ impl Agent {
                 .complete(&messages, &tool_refs, &self.model)
                 .await
                 .map_err(|e| match e {
-                    // Wrap non-provider errors with context about which provider/step failed
                     AgentError::Network(inner) => AgentError::Provider {
                         provider: self.provider.provider_name().to_string(),
                         message: format!("network error at step {step}: {inner}"),
@@ -342,13 +417,11 @@ impl Agent {
             let content = completion.content.clone().unwrap_or_default();
             let tool_calls = completion.tool_calls.clone();
             let raw_tool_calls = completion.raw_tool_calls.clone().unwrap_or(Value::Null);
-
             self.history.push(Message::assistant_with_tools(
                 content.clone(),
                 raw_tool_calls,
             ));
 
-            // No tool calls — final answer
             if tool_calls.is_empty() {
                 if !content.is_empty() {
                     return Ok(content);
@@ -360,13 +433,11 @@ impl Agent {
                 ));
             }
 
-            // Execute tools
             let mut executed_any = false;
             for call in &tool_calls {
                 if executed_tool_calls.contains(&call.id) {
                     continue;
                 }
-
                 println!(
                     "[{}] Executing tool: {}",
                     self.provider.provider_name(),
@@ -374,19 +445,16 @@ impl Agent {
                 );
                 let result = self.execute_tool(call).await?;
                 executed_tool_calls.insert(call.id.clone());
-
                 self.history.push(Message {
                     role: Role::Tool,
                     content: result,
                     tool_call_id: Some(call.id.clone()),
                     tool_calls: None,
                 });
-
                 executed_any = true;
             }
 
             if !executed_any {
-                // All tool call IDs were duplicates — avoid an infinite loop
                 if !content.is_empty() {
                     return Ok(content);
                 }
@@ -396,11 +464,78 @@ impl Agent {
                     None,
                 ));
             }
+        }
+        Err(AgentError::MaxSteps(self.max_steps))
+    }
 
-            // Loop back to get model's response to tool results
+    // ── Streaming run ─────────────────────────────────────────────────────
+    //
+    // Returns a TokenStream of text chunks as they arrive from the LLM.
+    //
+    // When tools are registered or the provider doesn't support streaming,
+    // falls back to complete() and wraps the result in a single-item stream
+    // — so callers always get a consistent stream interface.
+    //
+    // Example:
+    //   use futures::StreamExt;
+    //   let mut stream = agent.stream("Tell me a story").await?;
+    //   while let Some(chunk) = stream.next().await {
+    //       print!("{}", chunk?);
+    //   }
+
+    pub async fn stream(&mut self, user_input: &str) -> Result<TokenStream, AgentError> {
+        self.history.push(Message::user(user_input));
+
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: format!("[SYSTEM]: {}", self.system_prompt),
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        messages.extend(self.history.clone());
+
+        // Fall back to complete() when tools are registered or streaming unsupported
+        if !self.tools.is_empty() || !self.provider.supports_streaming() {
+            let tool_refs: Vec<&dyn Tool> = self.tools.iter().map(|t| t.as_ref()).collect();
+            let completion = self
+                .provider
+                .complete(&messages, &tool_refs, &self.model)
+                .await?;
+            let content = completion.content.unwrap_or_default();
+            self.history.push(Message::assistant(content.clone()));
+            let stream = futures::stream::once(async move { Ok(content) });
+            return Ok(Box::pin(stream));
         }
 
-        Err(AgentError::MaxSteps(self.max_steps))
+        // True streaming path
+        self.provider.stream_complete(&messages, &self.model).await
+    }
+
+    // ── stream_collect() — stream and collect into a String ───────────────
+    //
+    // Convenience wrapper: streams chunks to stdout and returns the full text.
+    // Adds the completed response to history automatically.
+    //
+    // Example:
+    //   let answer = agent.stream_collect("Tell me a story").await?;
+    //   println!("Full answer: {}", answer);
+
+    pub async fn stream_collect(&mut self, user_input: &str) -> Result<String, AgentError> {
+        use futures::StreamExt;
+
+        let mut stream = self.stream(user_input).await?;
+        let mut full = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            let text = chunk?;
+            print!("{}", text);
+            full.push_str(&text);
+        }
+        println!();
+
+        // Add the completed response to history
+        self.history.push(Message::assistant(full.clone()));
+        Ok(full)
     }
 
     async fn execute_tool(&self, call: &ToolCall) -> Result<String, AgentError> {

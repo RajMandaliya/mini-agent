@@ -1,6 +1,9 @@
 /// simple.rs — demonstrates swapping providers with zero agent-code changes.
 use mini_agent::{
-    Agent, AddNumbersTool, MultiplyNumbersTool, JokeTool,
+    AddNumbersTool,
+    Agent,
+    JokeTool,
+    MultiplyNumbersTool,
     // Pick ONE of the four providers below:
     OpenRouterProvider,
     // OpenAiProvider,
@@ -11,14 +14,13 @@ use std::env;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-
     // ── Provider selection ─────────────────────────────────────────────────
     //
     // Uncomment the provider you want to use and set the corresponding env var.
     //
     // Option 1: OpenRouter (default — any model via openrouter.ai)
     let api_key = env::var("OPENROUTER_API_KEY")?;
-    let model   = "meta-llama/llama-3.1-8b-instruct";
+    let model = "meta-llama/llama-3.1-8b-instruct";
     let provider = OpenRouterProvider::new(api_key, model);
 
     // Option 2: OpenAI
@@ -52,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Question: {}", question);
         match agent.run(question).await {
             Ok(answer) => println!("Answer: {}\n", answer),
-            Err(e)     => println!("Error: {}\n", e),
+            Err(e) => println!("Error: {}\n", e),
         }
     }
 

@@ -26,7 +26,9 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
-    fn provider_name(&self) -> &str { "Anthropic" }
+    fn provider_name(&self) -> &str {
+        "Anthropic"
+    }
 
     async fn complete(
         &self,
@@ -34,7 +36,11 @@ impl LlmProvider for AnthropicProvider {
         tools: &[&dyn Tool],
         model: &str,
     ) -> Result<Completion, AgentError> {
-        let active_model = if model.is_empty() { &self.default_model } else { model };
+        let active_model = if model.is_empty() {
+            &self.default_model
+        } else {
+            model
+        };
 
         // ── Convert messages ───────────────────────────────────────────────
         // Anthropic separates system messages and uses a content-block format
@@ -47,7 +53,8 @@ impl LlmProvider for AnthropicProvider {
                 Role::User => {
                     // Extract a synthetic [SYSTEM] prefix injected by the agent loop
                     if msg.content.starts_with("[SYSTEM]: ") {
-                        system_prompt = Some(msg.content.trim_start_matches("[SYSTEM]: ").to_string());
+                        system_prompt =
+                            Some(msg.content.trim_start_matches("[SYSTEM]: ").to_string());
                         continue;
                     }
                     // A tool result coming back from the agent sits in a "user"
@@ -92,16 +99,13 @@ impl LlmProvider for AnthropicProvider {
                                 .iter()
                                 .filter_map(|c| {
                                     let id = c.get("id")?.as_str()?;
-                                    let name =
-                                        c.get("function")?.get("name")?.as_str()?;
-                                    let raw_args =
-                                        c.get("function")?.get("arguments")?;
-                                    let input: Value =
-                                        if let Some(s) = raw_args.as_str() {
-                                            serde_json::from_str(s).ok()?
-                                        } else {
-                                            raw_args.clone()
-                                        };
+                                    let name = c.get("function")?.get("name")?.as_str()?;
+                                    let raw_args = c.get("function")?.get("arguments")?;
+                                    let input: Value = if let Some(s) = raw_args.as_str() {
+                                        serde_json::from_str(s).ok()?
+                                    } else {
+                                        raw_args.clone()
+                                    };
                                     Some(json!({
                                         "type": "tool_use",
                                         "id": id,
@@ -202,12 +206,22 @@ impl LlmProvider for AnthropicProvider {
                     let id = block
                         .get("id")
                         .and_then(|v| v.as_str())
-                        .ok_or_else(|| AgentError::invalid("Anthropic", format!("tool_use block[{i}] missing 'id'")))?
+                        .ok_or_else(|| {
+                            AgentError::invalid(
+                                "Anthropic",
+                                format!("tool_use block[{i}] missing 'id'"),
+                            )
+                        })?
                         .to_string();
                     let name = block
                         .get("name")
                         .and_then(|v| v.as_str())
-                        .ok_or_else(|| AgentError::invalid("Anthropic", format!("tool_use block[{i}] missing 'name'")))?
+                        .ok_or_else(|| {
+                            AgentError::invalid(
+                                "Anthropic",
+                                format!("tool_use block[{i}] missing 'name'"),
+                            )
+                        })?
                         .to_string();
                     let args = block.get("input").cloned().unwrap_or(json!({}));
 
@@ -231,13 +245,21 @@ impl LlmProvider for AnthropicProvider {
             }
         }
 
-        let content = if text_parts.is_empty() { None } else { Some(text_parts.join("\n")) };
+        let content = if text_parts.is_empty() {
+            None
+        } else {
+            Some(text_parts.join("\n"))
+        };
         let raw_tool_calls = if raw_tool_calls_arr.is_empty() {
             None
         } else {
             Some(json!(raw_tool_calls_arr))
         };
 
-        Ok(Completion { content, tool_calls, raw_tool_calls })
+        Ok(Completion {
+            content,
+            tool_calls,
+            raw_tool_calls,
+        })
     }
 }
